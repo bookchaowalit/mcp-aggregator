@@ -1481,6 +1481,442 @@ server.tool(
 );
 
 // =====================================================
+// PHASE 7: COLLABORATION TOOLS
+// =====================================================
+
+server.tool(
+    "list_collaborators",
+    "List all collaborators/team members",
+    {
+        include_inactive: z.boolean().optional().describe("Include inactive collaborators"),
+    },
+    async ({ include_inactive }) => {
+        const db = await getDb();
+        const sql = include_inactive
+            ? "SELECT * FROM collaborators ORDER BY role, name"
+            : "SELECT * FROM collaborators WHERE is_active = 1 ORDER BY role, name";
+        const collabs = db.prepare(sql).all();
+        return { content: [{ type: "text", text: JSON.stringify({ collaborators: collabs }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "add_collaborator",
+    "Add a new collaborator/team member",
+    {
+        name: z.string(),
+        email: z.string().optional(),
+        role: z.enum(["owner", "admin", "member", "viewer"]).optional().default("member"),
+        avatar_url: z.string().optional(),
+    },
+    async ({ name, email, role, avatar_url }) => {
+        const db = await getDb();
+        const result = db.prepare(
+            "INSERT INTO collaborators (name, email, role, avatar_url) VALUES (?, ?, ?, ?)"
+        ).run(name, email || null, role || "member", avatar_url || null);
+        return { content: [{ type: "text", text: JSON.stringify({ success: true, id: result.lastInsertRowid, name, role }) }] };
+    },
+);
+
+server.tool(
+    "list_activity",
+    "Recent activity feed — all changes to tasks, comments, assignments",
+    {
+        limit: z.number().optional().default(20),
+        target_type: z.string().optional().describe("Filter by target type: task, comment, shared_list, collaborator"),
+    },
+    async ({ limit, target_type }) => {
+        const db = await getDb();
+        const sql = target_type
+            ? "SELECT a.*, c.name as actor_name FROM activity_feed a LEFT JOIN collaborators c ON a.collaborator_id = c.id WHERE a.target_type = ? ORDER BY a.created_at DESC LIMIT ?"
+            : "SELECT a.*, c.name as actor_name FROM activity_feed a LEFT JOIN collaborators c ON a.collaborator_id = c.id ORDER BY a.created_at DESC LIMIT ?";
+        const rows = target_type
+            ? db.prepare(sql).all(target_type, limit)
+            : db.prepare(sql).all(limit);
+        return { content: [{ type: "text", text: JSON.stringify({ activity: rows, count: rows.length }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "list_shared_lists",
+    "List shared/curated task lists",
+    {},
+    async () => {
+        const db = await getDb();
+        const lists = db.prepare(
+            "SELECT sl.*, c.name as owner_name FROM shared_lists sl LEFT JOIN collaborators c ON sl.owner_id = c.id WHERE sl.is_active = 1 ORDER BY sl.name"
+        ).all();
+        return { content: [{ type: "text", text: JSON.stringify({ shared_lists: lists }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "create_shared_list",
+    "Create a shared task list (dynamic with filters or static with manual task IDs)",
+    {
+        name: z.string(),
+        description: z.string().optional(),
+        visibility: z.enum(["private", "team", "public"]).optional().default("private"),
+        list_type: z.enum(["dynamic", "static"]).optional().default("dynamic"),
+        filter_criteria: z.string().optional().describe("JSON filter for dynamic lists"),
+        task_ids: z.string().optional().describe("JSON array of task IDs for static lists"),
+    },
+    async ({ name, description, visibility, list_type, filter_criteria, task_ids }) => {
+        const db = await getDb();
+        const result = db.prepare(
+            "INSERT INTO shared_lists (name, description, visibility, list_type, filter_criteria, task_ids) VALUES (?, ?, ?, ?, ?, ?)"
+        ).run(name, description || null, visibility || "private", list_type || "dynamic", filter_criteria || null, task_ids || "[]");
+        return { content: [{ type: "text", text: JSON.stringify({ success: true, id: result.lastInsertRowid, name, list_type }) }] };
+    },
+);
+
+// =====================================================
+// PHASE 8: SECURITY TOOLS
+// =====================================================
+
+server.tool(
+    "show_audit_log",
+    "View audit log entries — all task/system operations",
+    {
+        limit: z.number().optional().default(30),
+        action: z.string().optional().describe("Filter by action type: create, update, delete, sync, export"),
+        target_type: z.string().optional().describe("Filter by target: task, project, collaborator, system"),
+    },
+    async ({ limit, action, target_type }) => {
+        const db = await getDb();
+        let sql = "SELECT * FROM audit_log";
+        const params: any[] = [];
+        const conditions: string[] = [];
+        if (action) { conditions.push("action = ?"); params.push(action); }
+        if (target_type) { conditions.push("target_type = ?"); params.push(target_type); }
+        if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
+        sql += " ORDER BY created_at DESC LIMIT ?";
+        params.push(limit);
+        const rows = db.prepare(sql).all(...params);
+        return { content: [{ type: "text", text: JSON.stringify({ audit_log: rows, count: rows.length }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "list_backups",
+    "List database backup history",
+    {
+        limit: z.number().optional().default(10),
+    },
+    async ({ limit }) => {
+        const db = await getDb();
+        const rows = db.prepare("SELECT * FROM backup_history ORDER BY created_at DESC LIMIT ?").all(limit);
+        return { content: [{ type: "text", text: JSON.stringify({ backups: rows }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "show_security_events",
+    "View security events — failed logins, rate limits, suspicious activity",
+    {
+        limit: z.number().optional().default(20),
+        severity: z.enum(["info", "warning", "critical"]).optional(),
+        unresolved_only: z.boolean().optional(),
+    },
+    async ({ limit, severity, unresolved_only }) => {
+        const db = await getDb();
+        let sql = "SELECT * FROM security_events";
+        const params: any[] = [];
+        const conditions: string[] = [];
+        if (severity) { conditions.push("severity = ?"); params.push(severity); }
+        if (unresolved_only) { conditions.push("resolved = 0"); }
+        if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
+        sql += " ORDER BY created_at DESC LIMIT ?";
+        params.push(limit);
+        const rows = db.prepare(sql).all(...params);
+        return { content: [{ type: "text", text: JSON.stringify({ events: rows, count: rows.length }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "list_permissions",
+    "List access permissions for collaborators",
+    {
+        collaborator_id: z.number().optional(),
+    },
+    async ({ collaborator_id }) => {
+        const db = await getDb();
+        const sql = collaborator_id
+            ? "SELECT p.*, c.name as collaborator_name FROM access_permissions p LEFT JOIN collaborators c ON p.collaborator_id = c.id WHERE p.collaborator_id = ? AND p.is_active = 1"
+            : "SELECT p.*, c.name as collaborator_name FROM access_permissions p LEFT JOIN collaborators c ON p.collaborator_id = c.id WHERE p.is_active = 1 ORDER BY c.name, p.resource_type";
+        const rows = collaborator_id
+            ? db.prepare(sql).all(collaborator_id)
+            : db.prepare(sql).all();
+        return { content: [{ type: "text", text: JSON.stringify({ permissions: rows }, null, 2) }] };
+    },
+);
+
+// =====================================================
+// PHASE 9: CUSTOMIZATION TOOLS
+// =====================================================
+
+server.tool(
+    "list_custom_fields",
+    "List custom field definitions for tasks",
+    {},
+    async () => {
+        const db = await getDb();
+        const fields = db.prepare("SELECT * FROM custom_fields ORDER BY sort_order, name").all();
+        return { content: [{ type: "text", text: JSON.stringify({ custom_fields: fields }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "list_preferences",
+    "List user preferences/settings",
+    {},
+    async () => {
+        const db = await getDb();
+        const prefs = db.prepare("SELECT * FROM user_preferences ORDER BY pref_key").all();
+        return { content: [{ type: "text", text: JSON.stringify({ preferences: prefs }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "update_preference",
+    "Update a user preference value",
+    {
+        pref_key: z.string(),
+        pref_value: z.string(),
+    },
+    async ({ pref_key, pref_value }) => {
+        const db = await getDb();
+        const result = db.prepare(
+            "UPDATE user_preferences SET pref_value = ?, updated_at = datetime('now') WHERE pref_key = ?"
+        ).run(pref_value, pref_key);
+        return { content: [{ type: "text", text: JSON.stringify({ success: true, updated: result.changes > 0, pref_key, pref_value }) }] };
+    },
+);
+
+server.tool(
+    "list_task_types",
+    "List custom task types/workflows",
+    {},
+    async () => {
+        const db = await getDb();
+        const types = db.prepare("SELECT * FROM task_types WHERE is_active = 1 ORDER BY sort_order").all();
+        return { content: [{ type: "text", text: JSON.stringify({ task_types: types }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "list_custom_views",
+    "List saved custom views/filters",
+    {},
+    async () => {
+        const db = await getDb();
+        const views = db.prepare(
+            "SELECT cv.*, c.name as owner_name FROM custom_views cv LEFT JOIN collaborators c ON cv.owner_id = c.id ORDER BY cv.name"
+        ).all();
+        return { content: [{ type: "text", text: JSON.stringify({ custom_views: views }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "run_custom_view",
+    "Execute a saved custom view and return matching tasks",
+    {
+        view_id: z.number(),
+    },
+    async ({ view_id }) => {
+        const db = await getDb();
+        const view = db.prepare("SELECT * FROM custom_views WHERE id = ?").get(view_id) as any;
+        if (!view) return { content: [{ type: "text", text: JSON.stringify({ error: "View not found" }) }] };
+
+        let filter = view.filter_criteria ? JSON.parse(view.filter_criteria) : {};
+        let sql = "SELECT * FROM tasks WHERE archived_at IS NULL";
+        const params: any[] = [];
+
+        if (filter.status) {
+            const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
+            sql += ` AND status IN (${statuses.map(() => "?").join(",")})`;
+            params.push(...statuses);
+        }
+        if (filter.priority) {
+            const priorities = Array.isArray(filter.priority) ? filter.priority : [filter.priority];
+            sql += ` AND priority IN (${priorities.map(() => "?").join(",")})`;
+            params.push(...priorities);
+        }
+        if (filter.project) { sql += " AND project = ?"; params.push(filter.project); }
+        if (filter.tags) {
+            const tags = Array.isArray(filter.tags) ? filter.tags : [filter.tags];
+            tags.forEach((t: string) => { sql += " AND tags LIKE ?"; params.push(`%${t}%`); });
+        }
+
+        // Sort
+        let sort = view.sort_criteria ? JSON.parse(view.sort_criteria) : null;
+        if (sort && sort.field) {
+            sql += ` ORDER BY ${sort.field} ${sort.direction || "ASC"}`;
+        } else {
+            sql += " ORDER BY priority, due_date";
+        }
+
+        const tasks = db.prepare(sql).all(...params);
+        return { content: [{ type: "text", text: JSON.stringify({ view: view.name, task_count: tasks.length, tasks }, null, 2) }] };
+    },
+);
+
+// =====================================================
+// PHASE 10: PERFORMANCE TOOLS
+// =====================================================
+
+server.tool(
+    "db_stats",
+    "Show comprehensive database statistics — size, tables, indexes, task distribution",
+    {},
+    async () => {
+        const db = await getDb();
+        const dbSize = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
+        const tableCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as any).c;
+        const indexCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").get() as any).c;
+        const taskCount = (db.prepare("SELECT COUNT(*) as c FROM tasks").get() as any).c;
+        const byStatus = db.prepare("SELECT status, COUNT(*) as count FROM tasks GROUP BY status").all();
+        const byPriority = db.prepare("SELECT priority, COUNT(*) as count FROM tasks GROUP BY priority ORDER BY priority").all();
+        const byProject = db.prepare("SELECT project, COUNT(*) as count FROM tasks WHERE project IS NOT NULL GROUP BY project ORDER BY count DESC LIMIT 10").all();
+        return {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    db_size_bytes: dbSize.size,
+                    db_size_mb: (dbSize.size / 1024 / 1024).toFixed(2),
+                    tables: tableCount,
+                    indexes: indexCount,
+                    total_tasks: taskCount,
+                    by_status: byStatus,
+                    by_priority: byPriority,
+                    top_projects: byProject,
+                }, null, 2),
+            }],
+        };
+    },
+);
+
+server.tool(
+    "take_perf_snapshot",
+    "Take a performance snapshot — captures current DB metrics",
+    {
+        snapshot_type: z.string().optional().default("manual"),
+    },
+    async ({ snapshot_type }) => {
+        const db = await getDb();
+        const dbSize = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
+        const taskCount = (db.prepare("SELECT COUNT(*) as c FROM tasks").get() as any).c;
+        const tableCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as any).c;
+        const indexCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").get() as any).c;
+        const metrics = JSON.stringify({ db_size: dbSize.size, tasks: taskCount, tables: tableCount, indexes: indexCount });
+        db.prepare("INSERT INTO performance_snapshots (snapshot_type, metrics_json) VALUES (?, ?)").run(snapshot_type || "manual", metrics);
+        return { content: [{ type: "text", text: JSON.stringify({ success: true, snapshot_type, metrics: JSON.parse(metrics) }) }] };
+    },
+);
+
+server.tool(
+    "run_integrity_check",
+    "Run database integrity check (PRAGMA integrity_check + foreign_key_check)",
+    {},
+    async () => {
+        const db = await getDb();
+        const integrity = db.prepare("PRAGMA integrity_check").get() as any;
+        const fkIssues = db.prepare("PRAGMA foreign_key_check").all();
+        return {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    integrity: integrity.integrity_check,
+                    fk_issues_count: fkIssues.length,
+                    fk_issues: fkIssues.length > 0 ? fkIssues.slice(0, 10) : [],
+                }, null, 2),
+            }],
+        };
+    },
+);
+
+server.tool(
+    "vacuum_db",
+    "Compact the database file (VACUUM) and report size savings",
+    {},
+    async () => {
+        const db = await getDb();
+        const before = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
+        db.exec("VACUUM");
+        const after = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
+        const saved = before.size - after.size;
+        return {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    before_bytes: before.size,
+                    after_bytes: after.size,
+                    saved_bytes: saved,
+                    saved_kb: (saved / 1024).toFixed(1),
+                }),
+            }],
+        };
+    },
+);
+
+server.tool(
+    "list_cache",
+    "List cached entries",
+    {
+        include_expired: z.boolean().optional(),
+    },
+    async ({ include_expired }) => {
+        const db = await getDb();
+        const sql = include_expired
+            ? "SELECT * FROM cache_entries ORDER BY created_at DESC"
+            : "SELECT * FROM cache_entries WHERE expires_at IS NULL OR expires_at > datetime('now') ORDER BY created_at DESC";
+        const entries = db.prepare(sql).all();
+        return { content: [{ type: "text", text: JSON.stringify({ cache_entries: entries, count: entries.length }, null, 2) }] };
+    },
+);
+
+server.tool(
+    "optimize_indexes",
+    "Create composite indexes and run ANALYZE for query optimization",
+    {},
+    async () => {
+        const db = await getDb();
+        const created: string[] = [];
+        const compositeIndexes = [
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project, status)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_due_priority ON tasks(due_date, priority)",
+        ];
+        for (const idx of compositeIndexes) {
+            db.exec(idx);
+            const name = idx.match(/idx_\w+/)?.[0] || "unknown";
+            created.push(name);
+        }
+        db.exec("ANALYZE");
+        return { content: [{ type: "text", text: JSON.stringify({ success: true, indexes_created: created, analyze: true }) }] };
+    },
+);
+
+server.tool(
+    "list_query_stats",
+    "View query performance statistics",
+    {
+        limit: z.number().optional().default(20),
+        query_name: z.string().optional(),
+    },
+    async ({ limit, query_name }) => {
+        const db = await getDb();
+        const sql = query_name
+            ? "SELECT query_name, COUNT(*) as calls, AVG(execution_time_ms) as avg_ms, MAX(execution_time_ms) as max_ms, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as errors FROM query_stats WHERE query_name = ? GROUP BY query_name"
+            : "SELECT query_name, COUNT(*) as calls, AVG(execution_time_ms) as avg_ms, MAX(execution_time_ms) as max_ms, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as errors FROM query_stats GROUP BY query_name ORDER BY calls DESC LIMIT ?";
+        const rows = query_name
+            ? db.prepare(sql).all(query_name)
+            : db.prepare(sql).all(limit);
+        return { content: [{ type: "text", text: JSON.stringify({ stats: rows }, null, 2) }] };
+    },
+);
+
+// =====================================================
 // START SERVER
 // =====================================================
 

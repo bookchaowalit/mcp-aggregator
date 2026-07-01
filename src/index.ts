@@ -2,6 +2,38 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getDb, initDb, closeDb } from "./db.js";
+import { execFile } from "child_process";
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+// Project root: infra/mcp-server/dist -> ../../..
+const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
+const SCRIPTS_DIR = resolve(PROJECT_ROOT, "infra", "scripts");
+const PYTHON = process.env.PYTHON || "python3";
+
+/** Helper: run a Python script with --json and return parsed result */
+function runPyScript(scriptPath: string, args: string[] = []): Promise<any> {
+    return new Promise((resolve, reject) => {
+        const fullArgs = [scriptPath, ...args, "--json"];
+        execFile(PYTHON, fullArgs, {
+            cwd: PROJECT_ROOT,
+            timeout: 30_000,
+            maxBuffer: 2 * 1024 * 1024,
+        }, (err, stdout, stderr) => {
+            if (err) {
+                reject(new Error(stderr?.slice(0, 500) || err.message));
+                return;
+            }
+            try {
+                resolve(JSON.parse(stdout));
+            } catch {
+                resolve({ raw: stdout.slice(0, 4000) });
+            }
+        });
+    });
+}
 
 const server = new McpServer({
     name: "solo-empire",
@@ -1913,6 +1945,252 @@ server.tool(
             ? db.prepare(sql).all(query_name)
             : db.prepare(sql).all(limit);
         return { content: [{ type: "text", text: JSON.stringify({ stats: rows }, null, 2) }] };
+    },
+);
+
+// =====================================================
+// ANALYTICS TOOLS — wrap Python analytics scripts
+// =====================================================
+
+server.tool(
+    "revenue_analytics",
+    "Run revenue analytics — trends, by-source breakdown, growth rates, forecasting",
+    {
+        source_type: z.string().optional().describe("Filter by source type"),
+        forecast: z.boolean().optional().describe("Include forecast"),
+    },
+    async ({ source_type, forecast }) => {
+        const args: string[] = [];
+        if (source_type) args.push("--source", source_type);
+        if (forecast) args.push("--forecast");
+        const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "revenue_analytics.py"), args);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+);
+
+server.tool(
+    "habit_analytics",
+    "Run habit analytics — streak data, completion rates, patterns",
+    {
+        habit_id: z.number().optional().describe("Filter by habit ID"),
+    },
+    async ({ habit_id }) => {
+        const args: string[] = [];
+        if (habit_id) args.push("--habit-id", String(habit_id));
+        const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "habit_analytics.py"), args);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+);
+
+server.tool(
+    "goal_velocity",
+    "Run goal velocity analysis — progress rate, ETA, at-risk goals",
+    {},
+    async () => {
+        const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "goal_velocity.py"));
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+);
+
+server.tool(
+    "time_analytics",
+    "Run time allocation analytics — hours by category, trends, productivity",
+    {
+        days: z.number().optional().describe("Lookback window in days"),
+    },
+    async ({ days }) => {
+        const args: string[] = [];
+        if (days) args.push("--days", String(days));
+        const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "time_analytics.py"), args);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+);
+
+// =====================================================
+// DATA FRESHNESS TOOLS
+// =====================================================
+
+server.tool(
+    "check_data_freshness",
+    "Check freshness of dashboard files and data directories — detect stale or missing data",
+    {
+        threshold_hours: z.number().optional().describe("Override default thresholds (hours)"),
+    },
+    async ({ threshold_hours }) => {
+        const args: string[] = [];
+        if (threshold_hours) args.push("--threshold", String(threshold_hours));
+        const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "data_freshness.py"), args);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+);
+
+// =====================================================
+// CRON MANAGEMENT TOOLS
+// =====================================================
+
+server.tool(
+    "list_cron_jobs",
+    "List all registered cron jobs with their status and schedule",
+    {
+        status: z.enum(["success", "failed", "pending"]).optional().describe("Filter by last status"),
+        job_type: z.string().optional().describe("Filter by job type"),
+    },
+    async ({ status, job_type }) => {
+        const db = await getDb();
+        let sql = "SELECT * FROM cron_jobs WHERE 1=1";
+        const params: any[] = [];
+        if (status) { sql += " AND last_status = ?"; params.push(status); }
+        if (job_type) { sql += " AND job_type = ?"; params.push(job_type); }
+        sql += " ORDER BY last_run_at DESC";
+        const jobs = db.prepare(sql).all(...params);
+        const summary = db.prepare(`
+            SELECT last_status, COUNT(*) as count FROM cron_jobs GROUP BY last_status
+        `).all();
+        return {
+            content: [{
+                type: "text",
+                text: JSON.stringify({ jobs, summary, total: jobs.length }, null, 2),
+            }],
+        };
+    },
+);
+
+server.tool(
+    "run_cron_job",
+    "Manually trigger a cron job by type",
+    {
+        job_type: z.string().describe("Job type to run (e.g. system_status, backup_db, revenue_autorun)"),
+        dry_run: z.boolean().optional().describe("If true, only show what would be done"),
+    },
+    async ({ job_type, dry_run }) => {
+        const db = await getDb();
+        const job = db.prepare("SELECT * FROM cron_jobs WHERE job_type = ?").get(job_type) as any;
+        if (!job) {
+            return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown job type: ${job_type}` }) }] };
+        }
+
+        if (dry_run) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        dry_run: true,
+                        job_type,
+                        name: job.name,
+                        schedule: job.schedule,
+                        last_status: job.last_status,
+                        last_run: job.last_run_at,
+                        message: "Would run this job. Omit dry_run to execute.",
+                    }, null, 2),
+                }],
+            };
+        }
+
+        // Map job_type to script (mirrors cron_healer.py JOB_MAP)
+        const JOB_SCRIPTS: Record<string, string> = {
+            take_snapshot: "utils/daily_snapshot.py",
+            smart_sync: "utils/smart_sync.py",
+            generate_tasks: "utils/recurring_gen.py",
+            check_notifications: "utils/notification_runner.py",
+            update_goals: "utils/goal_progress.py",
+            auto_archive: "utils/cleanup.py",
+            revenue_autorun: "utils/revenue_autorun.py",
+            weekly_habit_autogranted: "utils/weekly_habit_autogranted.py",
+            weekly_review_gen: "utils/weekly_review_gen.py",
+            goal_progress: "utils/goal_progress.py",
+            db_health_check: "utils/db_health_check.py",
+            system_status: "utils/system_status.py",
+            domain_scanner: "utils/domain_scanner.py",
+            run_alerts: "utils/alerts.py",
+            refresh_dashboards: "utils/dashboard_refresh.py",
+            backup_db: "utils/backup_rotation.py",
+            analytics_dashboard: "utils/analytics_dashboard.py",
+            revenue_analytics: "utils/revenue_analytics.py",
+            habit_analytics: "utils/habit_analytics.py",
+            goal_velocity: "utils/goal_velocity.py",
+            time_analytics: "utils/time_analytics.py",
+            data_freshness: "utils/data_freshness.py",
+            cron_heal: "utils/cron_healer.py",
+            sync_calendar: "sync/sync_google_calendar.py",
+            sync_gmail: "sync/sync_gmail_crm.py",
+            sync_leantime: "sync/leantime-sync.py",
+            sync_strava: "sync/sync_strava.py",
+            sync_binance: "sync/sync_binance_th.py",
+            sync_all: "sync/sync_all_integrations.py",
+        };
+
+        const script = JOB_SCRIPTS[job_type];
+        if (!script) {
+            return { content: [{ type: "text", text: JSON.stringify({ error: `No script mapping for: ${job_type}` }) }] };
+        }
+
+        return new Promise((fulfill) => {
+            execFile(PYTHON, [resolve(SCRIPTS_DIR, script), "--json"], {
+                cwd: PROJECT_ROOT,
+                timeout: 120_000,
+                maxBuffer: 2 * 1024 * 1024,
+            }, (err: any, stdout: string, stderr: string) => {
+                const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+                const newStatus = err ? "failed" : "success";
+                // Update DB
+                try {
+                    db.prepare("UPDATE cron_jobs SET last_run_at = ?, last_status = ? WHERE job_type = ?")
+                        .run(now, newStatus, job_type);
+                } catch {}
+
+                if (err) {
+                    fulfill({
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                job_type,
+                                status: "failed",
+                                error: (stderr || err.message).slice(0, 500),
+                                output: stdout?.slice(0, 1000),
+                            }, null, 2),
+                        }],
+                    });
+                } else {
+                    let parsed: any;
+                    try { parsed = JSON.parse(stdout); } catch { parsed = stdout?.slice(0, 4000); }
+                    fulfill({
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                job_type,
+                                status: "success",
+                                ran_at: now,
+                                output: parsed,
+                            }, null, 2),
+                        }],
+                    });
+                }
+            });
+        });
+    },
+);
+
+server.tool(
+    "system_health",
+    "Get overall system health — combines system status, cron health, data freshness, and alerts",
+    {},
+    async () => {
+        const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "system_health.py"));
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+);
+
+server.tool(
+    "heal_cron",
+    "Run the cron self-healer — retry failed jobs, alert if still failing",
+    {
+        dry_run: z.boolean().optional().describe("Preview what would be retried"),
+    },
+    async ({ dry_run }) => {
+        const args: string[] = [];
+        if (dry_run) args.push("--dry-run");
+        const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "cron_healer.py"), args);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
 );
 

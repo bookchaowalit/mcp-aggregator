@@ -5,6 +5,7 @@ import { getDb, initDb, closeDb } from "./db.js";
 import { execFile } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
+import * as fs from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2086,38 +2087,15 @@ server.tool(
             };
         }
 
-        // Map job_type to script (mirrors cron_healer.py JOB_MAP)
-        const JOB_SCRIPTS: Record<string, string> = {
-            take_snapshot: "utils/daily_snapshot.py",
-            smart_sync: "utils/smart_sync.py",
-            generate_tasks: "utils/recurring_gen.py",
-            check_notifications: "utils/notification_runner.py",
-            update_goals: "utils/goal_progress.py",
-            auto_archive: "utils/cleanup.py",
-            revenue_autorun: "utils/revenue_autorun.py",
-            weekly_habit_autogranted: "utils/weekly_habit_autogranted.py",
-            weekly_review_gen: "utils/weekly_review_gen.py",
-            goal_progress: "utils/goal_progress.py",
-            db_health_check: "utils/db_health_check.py",
-            system_status: "utils/system_status.py",
-            domain_scanner: "utils/domain_scanner.py",
-            run_alerts: "utils/alerts.py",
-            refresh_dashboards: "utils/dashboard_refresh.py",
-            backup_db: "utils/backup_rotation.py",
-            analytics_dashboard: "utils/analytics_dashboard.py",
-            revenue_analytics: "utils/revenue_analytics.py",
-            habit_analytics: "utils/habit_analytics.py",
-            goal_velocity: "utils/goal_velocity.py",
-            time_analytics: "utils/time_analytics.py",
-            data_freshness: "utils/data_freshness.py",
-            cron_heal: "utils/cron_healer.py",
-            sync_calendar: "sync/sync_google_calendar.py",
-            sync_gmail: "sync/sync_gmail_crm.py",
-            sync_leantime: "sync/leantime-sync.py",
-            sync_strava: "sync/sync_strava.py",
-            sync_binance: "sync/sync_binance_th.py",
-            sync_all: "sync/sync_all_integrations.py",
-        };
+        // Load cron registry from JSON (generated from cron_registry.py)
+        const cronRegistryPath = resolve(__dirname, '..', 'cron_registry.json');
+        let JOB_SCRIPTS: Record<string, string> = {};
+        try {
+            const registry = JSON.parse(fs.readFileSync(cronRegistryPath, 'utf-8'));
+            JOB_SCRIPTS = registry.job_scripts;
+        } catch (err) {
+            return { content: [{ type: "text", text: JSON.stringify({ error: `Failed to load cron registry: ${err}` }) }] };
+        }
 
         const script = JOB_SCRIPTS[job_type];
         if (!script) {

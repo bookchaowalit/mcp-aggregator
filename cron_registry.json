@@ -33,19 +33,13 @@
     "gmail_to_todoist": "sync/gmail_to_todoist.py",
     "gmail_daily_digest": "sync/gmail_daily_digest.py",
     "gmail_filters": "sync/gmail_filters.py",
-    "reconcile_overdue": "sync/reconcile_overdue_tasks.py",
-    "insights": "../../domains/product/engineering/book-dev/book-scraping/scripts/generate_insights.py",
-    "generate_pages": "../../domains/product/engineering/book-dev/book-scraping/scripts/generate_pages.py",
-    "publish_pages": "../../domains/product/engineering/book-dev/book-scraping/scripts/publish_pages.py"
+    "reconcile_overdue": "sync/reconcile_overdue_tasks.py"
   },
   "job_timeouts": {
     "sync_calendar": 180,
     "sync_gmail": 180,
     "sync_all": 300,
-    "backup_db": 180,
-    "insights": 180,
-    "generate_pages": 180,
-    "publish_pages": 180
+    "backup_db": 180
   },
-  "job_count": 37
+  "job_count": 34
 }

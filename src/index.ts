@@ -9,9 +9,9 @@ import * as fs from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-// Project root: infra/mcp-server/dist -> ../../..
-const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
-const SCRIPTS_DIR = resolve(PROJECT_ROOT, "infra", "scripts");
+// Repo root: infra/mcp-server/src (or dist) -> ../../..
+const REPO_ROOT = resolve(__dirname, "..", "..", "..");
+const SCRIPTS_DIR = resolve(REPO_ROOT, "infra", "scripts");
 const PYTHON = process.env.PYTHON || "python3";
 
 /** Helper: run a Python script with --json and return parsed result */
@@ -19,7 +19,7 @@ function runPyScript(scriptPath: string, args: string[] = []): Promise<any> {
     return new Promise((resolve, reject) => {
         const fullArgs = [scriptPath, ...args, "--json"];
         execFile(PYTHON, fullArgs, {
-            cwd: PROJECT_ROOT,
+            cwd: REPO_ROOT,
             timeout: 30_000,
             maxBuffer: 2 * 1024 * 1024,
         }, (err, stdout, stderr) => {
@@ -2104,7 +2104,7 @@ server.tool(
 
         return new Promise((fulfill) => {
             execFile(PYTHON, [resolve(SCRIPTS_DIR, script), "--json"], {
-                cwd: PROJECT_ROOT,
+                cwd: REPO_ROOT,
                 timeout: 120_000,
                 maxBuffer: 2 * 1024 * 1024,
             }, (err: any, stdout: string, stderr: string) => {

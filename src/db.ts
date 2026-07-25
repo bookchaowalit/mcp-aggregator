@@ -1,12 +1,37 @@
 import Database from "better-sqlite3";
 import { existsSync, readFileSync, mkdirSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, resolve, isAbsolute } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Allow overriding DB path via environment variable (useful for tests)
-const DB_PATH = process.env.DATABASE_PATH || join(__dirname, "../../database/solo-empire.db");
-const SCHEMA_PATH = join(__dirname, "../../database/schema.sql");
+// infra/mcp-server/src → repository root (not process.cwd())
+const REPO_ROOT = resolve(__dirname, "../../..");
+const DEFAULT_DB_REL = "infra/database/solo-empire.db";
+const SCHEMA_PATH = join(REPO_ROOT, "infra/database/schema.sql");
+
+/**
+ * Resolve SOLO_EMPIRE_DB_PATH relative to the repository root.
+ * Absolute paths are used as-is. Empty/unset → default under REPO_ROOT.
+ *
+ * DATABASE_PATH is accepted as a deprecated fallback for older tests/scripts.
+ */
+export function resolveDbPath(envValue?: string | null): string {
+    const raw =
+        envValue ??
+        process.env.SOLO_EMPIRE_DB_PATH ??
+        process.env.DATABASE_PATH ??
+        "";
+    if (!raw || !String(raw).trim()) {
+        return join(REPO_ROOT, DEFAULT_DB_REL);
+    }
+    const trimmed = String(raw).trim();
+    if (isAbsolute(trimmed)) {
+        return trimmed;
+    }
+    return resolve(REPO_ROOT, trimmed);
+}
+
+export const DB_PATH = resolveDbPath();
 
 let db: Database.Database | null = null;
 
@@ -21,7 +46,7 @@ export function getDb(): Database.Database {
     if (db) return db;
 
     const dbExists = existsSync(DB_PATH);
-    
+
     // Create directory if it doesn't exist
     const dbDir = dirname(DB_PATH);
     if (!existsSync(dbDir)) {
@@ -30,15 +55,15 @@ export function getDb(): Database.Database {
 
     // Open database with WAL mode for better concurrency
     db = new Database(DB_PATH);
-    
+
     // Enable WAL mode for concurrent read/write support
-    db.pragma('journal_mode = WAL');
-    
+    db.pragma("journal_mode = WAL");
+
     // Enable foreign keys
-    db.pragma('foreign_keys = ON');
-    
+    db.pragma("foreign_keys = ON");
+
     // Set busy timeout to handle lock contention gracefully
-    db.pragma('busy_timeout = 5000');
+    db.pragma("busy_timeout = 5000");
 
     if (!dbExists) {
         // New database - will be initialized by initDb()
@@ -58,10 +83,18 @@ export function initDb(): void {
     const database = getDb();
     const schema = readFileSync(SCHEMA_PATH, "utf-8");
 
-    // Execute schema SQL - better-sqlite3 handles multiple statements natively
-    database.exec(schema);
-
-    console.error("Database initialized successfully");
+    // Only apply the bootstrap schema to a new or empty database. Replaying
+    // plain CREATE TABLE statements against the live database is not safe.
+    const tableCount = database
+        .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'")
+        .get() as { count: number };
+    if (tableCount.count === 0) {
+        // Execute schema SQL - better-sqlite3 handles multiple statements natively
+        database.exec(schema);
+        console.error("Database initialized successfully");
+    } else {
+        console.error(`Database already initialized (${tableCount.count} tables)`);
+    }
 }
 
 /**
@@ -81,7 +114,7 @@ export function closeDb(): void {
  */
 export function runMigration(sql: string): void {
     const database = getDb();
-    
+
     // better-sqlite3's exec() handles multiple statements natively
     // No need for manual semicolon splitting
     database.exec(sql);

@@ -1364,7 +1364,7 @@ server.tool(
 
 server.tool(
     "create_task",
-    "Create a new task in the local task management system. Task will be pushed to Leantime on next sync.",
+    "Create a new local task. Employer work is managed in nexatech-empire and is not synced here.",
     {
         title: z.string().describe("Task title"),
         description: z.string().optional().describe("Task description"),
@@ -1387,14 +1387,14 @@ server.tool(
         );
         const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
         return {
-            content: [{ type: "text", text: JSON.stringify({ success: true, task, message: "Task created. Run sync to push to Leantime." }, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify({ success: true, task, message: "Task created locally. Personal sources can be synced separately." }, null, 2) }],
         };
     },
 );
 
 server.tool(
     "update_task",
-    "Update an existing task. Changes will be pushed to Leantime on next sync.",
+    "Update an existing local task. Employer work is managed in nexatech-empire.",
     {
         id: z.number().describe("Task ID"),
         title: z.string().optional(),
@@ -1444,7 +1444,7 @@ server.tool(
 
 server.tool(
     "complete_task",
-    "Mark a task as done. Will sync completion to Leantime.",
+    "Mark a local task as done.",
     { id: z.number().describe("Task ID") },
     async (params) => {
         const db = await getDb();
@@ -1466,7 +1466,7 @@ server.tool(
 
 server.tool(
     "delete_task",
-    "Delete a local task. If synced to Leantime, the external ticket is NOT deleted.",
+    "Delete a local task. External employer records are managed outside Solo Empire.",
     { id: z.number().describe("Task ID") },
     async (params) => {
         const db = await getDb();
@@ -1476,14 +1476,14 @@ server.tool(
         }
         db.prepare("DELETE FROM tasks WHERE id = ?").run(params.id);
         return {
-            content: [{ type: "text", text: JSON.stringify({ success: true, deleted: task.title, warning: task.external_id ? "External ticket in Leantime was NOT deleted" : undefined }, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify({ success: true, deleted: task.title, warning: task.external_id ? "External record is managed outside Solo Empire" : undefined }, null, 2) }],
         };
     },
 );
 
 server.tool(
     "task_sync_status",
-    "Show task sync status — breakdown by work (Nexatech/Leantime) vs personal (Todoist/Jira/Notion), sync state, and project.",
+    "Show task sync status — personal sources (Todoist/Jira/Notion), sync state, and project. Employer work is external.",
     {},
     async () => {
         const db = await getDb();

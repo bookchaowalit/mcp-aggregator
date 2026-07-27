@@ -25,8 +25,6 @@
     "data_freshness": "utils/data_freshness.py",
     "sync_calendar": "sync/sync_google_calendar.py",
     "sync_gmail": "sync/sync_gmail_crm.py",
-    "sync_strava": "sync/sync_strava.py",
-    "sync_binance": "sync/sync_binance_th.py",
     "sync_all": "sync/sync_all_integrations.py",
     "gmail_categorize": "sync/gmail_categorizer.py",
     "gmail_to_todoist": "sync/gmail_to_todoist.py",
@@ -40,5 +38,5 @@
     "sync_all": 300,
     "backup_db": 180
   },
-    "job_count": 33
+  "job_count": 31
 }

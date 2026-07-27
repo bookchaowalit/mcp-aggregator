@@ -16,6 +16,7 @@
     "run_alerts": "utils/alerts.py",
     "refresh_dashboards": "utils/dashboard_refresh.py",
     "backup_db": "utils/backup_rotation.py",
+    "media_lifecycle": "utils/media_lifecycle.py",
     "analytics_dashboard": "utils/analytics_dashboard.py",
     "revenue_analytics": "utils/revenue_analytics.py",
     "habit_analytics": "utils/habit_analytics.py",
@@ -36,7 +37,8 @@
     "sync_calendar": 180,
     "sync_gmail": 180,
     "sync_all": 300,
-    "backup_db": 180
+    "backup_db": 180,
+    "media_lifecycle": 600
   },
-  "job_count": 31
+  "job_count": 32
 }

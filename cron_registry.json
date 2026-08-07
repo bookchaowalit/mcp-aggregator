@@ -4,6 +4,7 @@
     "smart_sync": "utils/smart_sync.py",
     "generate_tasks": "utils/recurring_gen.py",
     "check_notifications": "utils/notification_runner.py",
+    "engagement_notifications": "utils/engagement_notifications.py",
     "update_goals": "utils/goal_progress.py",
     "auto_archive": "utils/cleanup.py",
     "revenue_autorun": "utils/revenue_autorun.py",
@@ -25,7 +26,7 @@
     "cron_heal": "utils/cron_healer.py",
     "data_freshness": "utils/data_freshness.py",
     "sync_calendar": "sync/sync_google_calendar.py",
-    "sync_gmail": "sync/sync_gmail_crm.py",
+    "sync_gmail": "sync/email_data_pipeline.py",
     "sync_all": "sync/sync_all_integrations.py",
     "gmail_categorize": "sync/gmail_categorizer.py",
     "gmail_to_todoist": "sync/gmail_to_todoist.py",
@@ -35,10 +36,10 @@
   },
   "job_timeouts": {
     "sync_calendar": 180,
-    "sync_gmail": 180,
+    "sync_gmail": 300,
     "sync_all": 300,
     "backup_db": 180,
     "media_lifecycle": 600
   },
-  "job_count": 32
+  "job_count": 33
 }

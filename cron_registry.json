@@ -17,6 +17,8 @@
     "run_alerts": "utils/alerts.py",
     "refresh_dashboards": "utils/dashboard_refresh.py",
     "decision_review": "workflows/decision_review.py",
+    "decision_brief_daily": "workflows/decision_brief.py",
+    "decision_brief_weekly": "workflows/decision_brief.py",
     "backup_db": "utils/backup_rotation.py",
     "media_lifecycle": "utils/media_lifecycle.py",
     "analytics_dashboard": "utils/analytics_dashboard.py",
@@ -43,5 +45,5 @@
     "media_lifecycle": 600,
     "cron_heal": 600
   },
-  "job_count": 34
+  "job_count": 36
 }

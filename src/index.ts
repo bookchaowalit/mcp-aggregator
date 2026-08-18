@@ -60,6 +60,7 @@ import { registerPerformanceTools } from "./tools/performance.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
 import { registerDataFreshnessTools } from "./tools/data-freshness.js";
 import { registerCronTools } from "./tools/cron.js";
+import { registerBrowserBookmarkTools } from "./tools/browser-bookmarks.js";
 
 const toolContext: ToolContext = {
     server,
@@ -91,6 +92,7 @@ registerPerformanceTools(toolContext);
 registerAnalyticsTools(toolContext);
 registerDataFreshnessTools(toolContext);
 registerCronTools(toolContext);
+registerBrowserBookmarkTools(toolContext);
 
 // =====================================================
 // START SERVER

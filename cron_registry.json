@@ -31,6 +31,7 @@
     "cron_heal": "utils/cron_healer.py",
     "data_freshness": "utils/data_freshness.py",
     "sync_calendar": "sync/sync_google_calendar.py",
+    "brave_bookmarks_maintenance": "sync/brave_bookmark_workflow.py",
     "sync_gmail": "sync/email_data_pipeline.py",
     "sync_all": "sync/sync_all_integrations.py",
     "gmail_categorize": "sync/gmail_categorizer.py",
@@ -41,6 +42,7 @@
   },
   "job_timeouts": {
     "sync_calendar": 180,
+    "brave_bookmarks_maintenance": 300,
     "sync_gmail": 300,
     "sync_all": 300,
     "backup_db": 180,
@@ -48,5 +50,5 @@
     "cron_heal": 600,
     "book_dev_loop": 600
   },
-  "job_count": 38
+  "job_count": 39
 }

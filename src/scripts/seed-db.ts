@@ -299,6 +299,13 @@ const skills = [
         priority: 1,
     },
     {
+        name: "Protocol Engineering",
+        slug: "protocol-engineering",
+        category: "infrastructure",
+        target_level: "L1_deep",
+        priority: 1,
+    },
+    {
         name: "Platform Engineering",
         slug: "platform-engineering",
         category: "infrastructure",

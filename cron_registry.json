@@ -21,7 +21,7 @@
     "book_dev_loop": "workflows/book_dev_loop.py",
     "decision_brief_daily": "workflows/decision_brief.py",
     "decision_brief_weekly": "workflows/decision_brief.py",
-    "backup_db": "utils/backup_rotation.py",
+    "backup_db": "db/offhost_backup.py",
     "media_lifecycle": "utils/media_lifecycle.py",
     "analytics_dashboard": "utils/analytics_dashboard.py",
     "revenue_analytics": "utils/revenue_analytics.py",
@@ -45,7 +45,7 @@
     "brave_bookmarks_maintenance": 300,
     "sync_gmail": 300,
     "sync_all": 300,
-    "backup_db": 180,
+    "backup_db": 600,
     "media_lifecycle": 600,
     "cron_heal": 600,
     "book_dev_loop": 600

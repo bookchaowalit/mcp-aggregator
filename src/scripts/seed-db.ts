@@ -710,37 +710,58 @@ const opportunities = [
     },
 ];
 
-for (const opp of opportunities) {
-    const score =
-        (opp.pain_level || 3) * 0.2 +
-        (opp.budget_level || 3) * 0.2 +
-        (opp.frequency_level || 3) * 0.15 +
-        (opp.ai_leverage_level || 3) * 0.15 +
-        (opp.competition_level || 3) * 0.1 +
-        (opp.distribution_level || 3) * 0.1 +
-        (opp.fit_level || 3) * 0.1;
-    db.prepare(
-        "INSERT INTO opportunities (name, description, type, tier, pain_level, budget_level, frequency_level, ai_leverage_level, competition_level, distribution_level, fit_level, total_score, target_market, revenue_model, price_range, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run(
-        opp.name,
-        opp.description,
-        opp.type,
-        opp.tier,
-        opp.pain_level,
-        opp.budget_level,
-        opp.frequency_level,
-        opp.ai_leverage_level,
-        opp.competition_level,
-        opp.distribution_level,
-        opp.fit_level,
-        score,
-        opp.target_market,
-        opp.revenue_model,
-        opp.price_range,
-        "researching",
-    );
-}
-console.log(`Seeded ${opportunities.length} opportunities`);
+const insertOpportunity = db.prepare(`
+    INSERT INTO opportunities (
+        name, description, type, tier, pain_level, budget_level,
+        frequency_level, ai_leverage_level, competition_level,
+        distribution_level, fit_level, total_score, target_market,
+        revenue_model, price_range, status
+    )
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE NOT EXISTS (
+        SELECT 1 FROM opportunities WHERE name = ?
+    )
+`);
+
+const seedOpportunities = db.transaction(() => {
+    let inserted = 0;
+    for (const opp of opportunities) {
+        const score =
+            (opp.pain_level || 3) * 0.2 +
+            (opp.budget_level || 3) * 0.2 +
+            (opp.frequency_level || 3) * 0.15 +
+            (opp.ai_leverage_level || 3) * 0.15 +
+            (opp.competition_level || 3) * 0.1 +
+            (opp.distribution_level || 3) * 0.1 +
+            (opp.fit_level || 3) * 0.1;
+        inserted += insertOpportunity.run(
+            opp.name,
+            opp.description,
+            opp.type,
+            opp.tier,
+            opp.pain_level,
+            opp.budget_level,
+            opp.frequency_level,
+            opp.ai_leverage_level,
+            opp.competition_level,
+            opp.distribution_level,
+            opp.fit_level,
+            score,
+            opp.target_market,
+            opp.revenue_model,
+            opp.price_range,
+            "researching",
+            opp.name,
+        ).changes;
+    }
+    return inserted;
+});
+
+const insertedOpportunities = seedOpportunities.immediate();
+console.log(
+    `Seeded ${insertedOpportunities}/${opportunities.length} opportunities ` +
+        `(${opportunities.length - insertedOpportunities} already existed)`,
+);
 
 // =====================================================
 // SEED GOALS
@@ -805,20 +826,38 @@ const goals = [
     },
 ];
 
-for (const goal of goals) {
-    db.prepare(
-        "INSERT INTO goals (title, description, type, category, priority, status, progress_percent) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(
-        goal.title,
-        goal.description,
-        goal.type,
-        goal.category,
-        goal.priority,
-        "active",
-        0,
-    );
-}
-console.log(`Seeded ${goals.length} goals`);
+const insertGoal = db.prepare(`
+    INSERT INTO goals (
+        title, description, type, category, priority, status, progress_percent
+    )
+    SELECT ?, ?, ?, ?, ?, ?, ?
+    WHERE NOT EXISTS (
+        SELECT 1 FROM goals WHERE title = ?
+    )
+`);
+
+const seedGoals = db.transaction(() => {
+    let inserted = 0;
+    for (const goal of goals) {
+        inserted += insertGoal.run(
+            goal.title,
+            goal.description,
+            goal.type,
+            goal.category,
+            goal.priority,
+            "active",
+            0,
+            goal.title,
+        ).changes;
+    }
+    return inserted;
+});
+
+const insertedGoals = seedGoals.immediate();
+console.log(
+    `Seeded ${insertedGoals}/${goals.length} goals ` +
+        `(${goals.length - insertedGoals} already existed)`,
+);
 
 console.log("Database seeded successfully!");
 closeDb();

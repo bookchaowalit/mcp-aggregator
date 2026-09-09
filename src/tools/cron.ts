@@ -11,7 +11,6 @@ export function registerCronTools({
     python: PYTHON,
     moduleDir: __dirname,
     execFile,
-    fs,
 }: ToolContext): void {
 
     server.tool(
@@ -50,7 +49,7 @@ export function registerCronTools({
         },
         async ({ job_type, dry_run }) => {
             const db = await getDb();
-            const job = db.prepare("SELECT * FROM cron_jobs WHERE job_type = ?").get(job_type) as any;
+            const job = db.prepare("SELECT * FROM cron_jobs WHERE job_type = ? ORDER BY id LIMIT 1").get(job_type) as any;
             if (!job) {
                 return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown job type: ${job_type}` }) }] };
             }
@@ -64,6 +63,7 @@ export function registerCronTools({
                             job_type,
                             name: job.name,
                             schedule: job.schedule,
+                            is_active: Boolean(job.is_active),
                             last_status: job.last_status,
                             last_run: job.last_run_at,
                             message: "Would run this job. Omit dry_run to execute.",
@@ -71,35 +71,28 @@ export function registerCronTools({
                     }],
                 };
             }
-
-            // Load cron registry from JSON (generated from cron_registry.py)
-            const cronRegistryPath = resolve(__dirname, '..', 'cron_registry.json');
-            let JOB_SCRIPTS: Record<string, string> = {};
-            try {
-                const registry = JSON.parse(fs.readFileSync(cronRegistryPath, 'utf-8'));
-                JOB_SCRIPTS = registry.job_scripts;
-            } catch (err) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: `Failed to load cron registry: ${err}` }) }] };
-            }
-
-            const script = JOB_SCRIPTS[job_type];
-            if (!script) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: `No script mapping for: ${job_type}` }) }] };
+            if (!job.is_active) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: JSON.stringify({ error: `Job is inactive in cron_jobs: ${job_type}` }),
+                    }],
+                };
             }
 
             return new Promise((fulfill) => {
-                execFile(PYTHON, [resolve(SCRIPTS_DIR, script), "--json"], {
+                // Use the same runner as system cron. It owns registry lookup,
+                // default args, DB params, per-job timeout, locking, and status
+                // updates, so MCP cannot drift into a second scheduler.
+                const runner = resolve(SCRIPTS_DIR, "utils", "cron_runner.py");
+                execFile(PYTHON, [runner, "--run", job_type], {
                     cwd: REPO_ROOT,
-                    timeout: 120_000,
+                    timeout: 900_000,
                     maxBuffer: 2 * 1024 * 1024,
                 }, (err: any, stdout: string, stderr: string) => {
-                    const now = new Date().toISOString().replace("T", " ").slice(0, 19);
-                    const newStatus = err ? "failed" : "success";
-                    // Update DB
-                    try {
-                        db.prepare("UPDATE cron_jobs SET last_run_at = ?, last_status = ? WHERE job_type = ?")
-                            .run(now, newStatus, job_type);
-                    } catch {}
+                    const state = db.prepare(
+                        "SELECT last_run_at, last_status FROM cron_jobs WHERE job_type = ? ORDER BY id LIMIT 1",
+                    ).get(job_type) as any;
 
                     if (err) {
                         fulfill({
@@ -110,20 +103,19 @@ export function registerCronTools({
                                     status: "failed",
                                     error: (stderr || err.message).slice(0, 500),
                                     output: stdout?.slice(0, 1000),
+                                    last_run: state?.last_run_at,
                                 }, null, 2),
                             }],
                         });
                     } else {
-                        let parsed: any;
-                        try { parsed = JSON.parse(stdout); } catch { parsed = stdout?.slice(0, 4000); }
                         fulfill({
                             content: [{
                                 type: "text",
                                 text: JSON.stringify({
                                     job_type,
-                                    status: "success",
-                                    ran_at: now,
-                                    output: parsed,
+                                    status: state?.last_status || "success",
+                                    ran_at: state?.last_run_at,
+                                    output: stdout?.slice(0, 4000),
                                 }, null, 2),
                             }],
                         });

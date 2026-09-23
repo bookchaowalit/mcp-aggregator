@@ -3,6 +3,7 @@ import { getDb, initDb, closeDb } from "../db.js";
 console.log("Seeding database...");
 await initDb();
 const db = await getDb();
+const skillsOnly = process.argv.includes("--skills-only");
 
 // =====================================================
 // SEED SKILL CATEGORIES
@@ -757,11 +758,15 @@ const seedOpportunities = db.transaction(() => {
     return inserted;
 });
 
-const insertedOpportunities = seedOpportunities.immediate();
-console.log(
-    `Seeded ${insertedOpportunities}/${opportunities.length} opportunities ` +
-        `(${opportunities.length - insertedOpportunities} already existed)`,
-);
+const insertedOpportunities = skillsOnly ? 0 : seedOpportunities.immediate();
+if (skillsOnly) {
+    console.log("Skills-only mode: skipped opportunity defaults");
+} else {
+    console.log(
+        `Seeded ${insertedOpportunities}/${opportunities.length} opportunities ` +
+            `(${opportunities.length - insertedOpportunities} already existed)`,
+    );
+}
 
 // =====================================================
 // SEED GOALS
@@ -853,11 +858,15 @@ const seedGoals = db.transaction(() => {
     return inserted;
 });
 
-const insertedGoals = seedGoals.immediate();
-console.log(
-    `Seeded ${insertedGoals}/${goals.length} goals ` +
-        `(${goals.length - insertedGoals} already existed)`,
-);
+const insertedGoals = skillsOnly ? 0 : seedGoals.immediate();
+if (skillsOnly) {
+    console.log("Skills-only mode: skipped business goal defaults");
+} else {
+    console.log(
+        `Seeded ${insertedGoals}/${goals.length} goals ` +
+            `(${goals.length - insertedGoals} already existed)`,
+    );
+}
 
-console.log("Database seeded successfully!");
+console.log(skillsOnly ? "Skill catalog seeded successfully!" : "Database seeded successfully!");
 closeDb();

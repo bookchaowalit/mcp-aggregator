@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { existsSync, readFileSync, mkdirSync } from "fs";
 import { join, dirname, resolve, isAbsolute } from "path";
 import { fileURLToPath } from "url";
+import { spawnSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // infra/mcp-server/src → repository root (not process.cwd())
@@ -36,16 +37,23 @@ export const DB_PATH = resolveDbPath();
 let db: Database.Database | null = null;
 
 /**
- * Get or create the database connection.
+ * Open an existing database; creation requires explicit initialization.
  * Uses better-sqlite3 for native SQLite access with:
  * - WAL mode for concurrent reads
  * - Foreign keys enabled
  * - Native file-based storage (no in-memory sync issues)
  */
 export function getDb(): Database.Database {
+    return openDb(false);
+}
+
+function openDb(allowCreate: boolean): Database.Database {
     if (db) return db;
 
     const dbExists = existsSync(DB_PATH);
+    if (!dbExists && !allowCreate) {
+        throw new Error(`Database missing at ${DB_PATH}; run an explicit db:init or recovery. Refusing automatic empty-ledger creation.`);
+    }
 
     // Create directory if it doesn't exist
     const dbDir = dirname(DB_PATH);
@@ -80,7 +88,8 @@ export function getDb(): Database.Database {
  * Creates tables if they don't exist.
  */
 export function initDb(): void {
-    const database = getDb();
+    if (!existsSync(DB_PATH)) guardBootstrap();
+    const database = openDb(true);
     const schema = readFileSync(SCHEMA_PATH, "utf-8");
 
     // Only apply the bootstrap schema to a new or empty database. Replaying
@@ -89,12 +98,26 @@ export function initDb(): void {
         .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'")
         .get() as { count: number };
     if (tableCount.count === 0) {
+        guardBootstrap();
         // Execute schema SQL - better-sqlite3 handles multiple statements natively
         database.exec(schema);
         console.error("Database initialized successfully");
     } else {
         console.error(`Database already initialized (${tableCount.count} tables)`);
     }
+}
+
+function guardBootstrap(): void {
+    const python = process.env.SOLO_EMPIRE_PYTHON3 || (process.platform === "win32" ? "python" : "python3");
+    const result = spawnSync(
+        python,
+        [join(REPO_ROOT, "infra", "scripts", "db", "finance_safety.py"), "--bootstrap", "--db-path", DB_PATH],
+        { encoding: "utf-8", timeout: 30_000, env: { ...process.env, PYTHONIOENCODING: "utf-8" } },
+    );
+    if (result.error || result.status !== 0) {
+        throw new Error(result.error?.message || result.stderr.trim() || "Database bootstrap guard failed");
+    }
+    if (result.stdout.trim()) console.error(result.stdout.trim());
 }
 
 /**

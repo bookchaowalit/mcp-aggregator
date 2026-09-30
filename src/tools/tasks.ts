@@ -1,31 +1,24 @@
 import { z } from "zod";
-import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { buildTaskUpdate, taskStatusSchema, unarchivedTasksWhere, type TaskStatus } from "../task-state.js";
 
 export function registerTasksTools({
     server,
     getDb,
-    runPyScript,
-    scriptsDir: SCRIPTS_DIR,
-    repoRoot: REPO_ROOT,
-    python: PYTHON,
-    moduleDir: __dirname,
-    execFile,
-    fs,
-}: ToolContext): void {
+}: Pick<ToolContext, "server" | "getDb">): void {
 
     server.tool(
         "list_tasks",
         "List all tasks from the local task management system. Supports filtering by status, project, and priority.",
         {
-            status: z.enum(["todo", "in_progress", "done", "blocked", "cancelled"]).optional(),
+            status: taskStatusSchema.optional(),
             project: z.string().optional(),
             priority: z.number().min(1).max(5).optional(),
             limit: z.number().min(1).max(100).default(50),
         },
         async (params) => {
             const db = await getDb();
-            let sql = "SELECT * FROM tasks WHERE 1=1";
+            let sql = `SELECT * FROM tasks WHERE ${unarchivedTasksWhere}`;
             const values: any[] = [];
 
             if (params.status) { sql += " AND status = ?"; values.push(params.status); }
@@ -58,11 +51,12 @@ export function registerTasksTools({
             const db = await getDb();
             const tagsJson = params.tags ? JSON.stringify(params.tags.split(",").map(t => t.trim())) : null;
             const result = db.prepare(`
-                INSERT INTO tasks (title, description, status, priority, project, category, due_date, tags, sync_status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local', datetime('now'), datetime('now'))
+                INSERT INTO tasks (title, description, status, priority, project, category, due_date, tags, progress_percent, completed_at, sync_status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'done' THEN datetime('now') END, 'local', datetime('now'), datetime('now'))
             `).run(
                 params.title, params.description || null, params.status, params.priority,
-                params.project || null, params.category || null, params.due_date || null, tagsJson
+                params.project || null, params.category || null, params.due_date || null, tagsJson,
+                params.status === "done" ? 100 : 0, params.status
             );
             const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
             return {
@@ -78,7 +72,7 @@ export function registerTasksTools({
             id: z.number().describe("Task ID"),
             title: z.string().optional(),
             description: z.string().optional(),
-            status: z.enum(["todo", "in_progress", "done", "blocked", "cancelled"]).optional(),
+            status: taskStatusSchema.optional(),
             priority: z.number().min(1).max(5).optional(),
             project: z.string().optional(),
             due_date: z.string().optional(),
@@ -86,34 +80,17 @@ export function registerTasksTools({
         async (params) => {
             const db = await getDb();
             const { id, ...fields } = params;
-            const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as any;
+            const existing = db.prepare("SELECT status FROM tasks WHERE id = ?").get(id) as { status: TaskStatus } | undefined;
             if (!existing) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: `Task ${id} not found` }) }] };
+                return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Task ${id} not found` }) }] };
             }
 
-            const updates: string[] = [];
-            const values: any[] = [];
-            for (const [key, val] of Object.entries(fields)) {
-                if (val !== undefined) {
-                    updates.push(`${key} = ?`);
-                    values.push(val);
-                }
-            }
-            if (updates.length === 0) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: "No fields to update" }) }] };
+            const update = buildTaskUpdate(fields, existing.status);
+            if (update.assignments.length === 0) {
+                return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: "No fields to update" }) }] };
             }
 
-            // Mark as dirty so sync pushes to external
-            const newStatus = params.status || existing.status;
-            const completedAt = newStatus === "done" && existing.status !== "done" ? "datetime('now')" : null;
-
-            if (completedAt) {
-                updates.push("completed_at = datetime('now')");
-            }
-            updates.push("sync_status = 'dirty'");
-            updates.push("updated_at = datetime('now')");
-
-            db.prepare(`UPDATE tasks SET ${updates.join(", ")} WHERE id = ?`).run(...values, id);
+            db.prepare(`UPDATE tasks SET ${update.assignments.join(", ")} WHERE id = ?`).run(...update.values, id);
             const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
             return {
                 content: [{ type: "text", text: JSON.stringify({ success: true, task: updated, message: "Task updated. Run sync to push changes." }, null, 2) }],
@@ -127,15 +104,12 @@ export function registerTasksTools({
         { id: z.number().describe("Task ID") },
         async (params) => {
             const db = await getDb();
-            const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(params.id) as any;
+            const existing = db.prepare("SELECT status FROM tasks WHERE id = ?").get(params.id) as { status: TaskStatus } | undefined;
             if (!existing) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: `Task ${params.id} not found` }) }] };
+                return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Task ${params.id} not found` }) }] };
             }
-            db.prepare(`
-                UPDATE tasks SET status = 'done', completed_at = datetime('now'),
-                  sync_status = 'dirty', updated_at = datetime('now')
-                WHERE id = ?
-            `).run(params.id);
+            const update = buildTaskUpdate({ status: "done" }, existing.status);
+            db.prepare(`UPDATE tasks SET ${update.assignments.join(", ")} WHERE id = ?`).run(...update.values, params.id);
             const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(params.id);
             return {
                 content: [{ type: "text", text: JSON.stringify({ success: true, task: updated }, null, 2) }],
@@ -151,7 +125,7 @@ export function registerTasksTools({
             const db = await getDb();
             const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(params.id) as any;
             if (!task) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: `Task ${params.id} not found` }) }] };
+                return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Task ${params.id} not found` }) }] };
             }
             db.prepare("DELETE FROM tasks WHERE id = ?").run(params.id);
             return {
@@ -166,14 +140,14 @@ export function registerTasksTools({
         {},
         async () => {
             const db = await getDb();
-            const total = db.prepare("SELECT COUNT(*) as c FROM tasks").get() as any;
-            const byStatus = db.prepare("SELECT status, COUNT(*) as c FROM tasks GROUP BY status").all();
-            const bySync = db.prepare("SELECT sync_status, COUNT(*) as c FROM tasks GROUP BY sync_status").all();
-            const byProject = db.prepare("SELECT project, COUNT(*) as c FROM tasks WHERE project IS NOT NULL GROUP BY project ORDER BY c DESC").all();
-            const bySource = db.prepare("SELECT external_source, COUNT(*) as c FROM tasks WHERE external_source IS NOT NULL GROUP BY external_source").all();
-            const workCount = (db.prepare("SELECT COUNT(*) as c FROM tasks WHERE external_source = 'leantime'").get() as any).c;
-            const personalCount = (db.prepare("SELECT COUNT(*) as c FROM tasks WHERE external_source IS NULL OR external_source != 'leantime'").get() as any).c;
-            const dirty = db.prepare("SELECT id, title, sync_status, external_source FROM tasks WHERE sync_status IN ('dirty', 'conflict') ORDER BY priority").all();
+            const total = db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere}`).get() as { c: number };
+            const byStatus = db.prepare(`SELECT status, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} GROUP BY status`).all();
+            const bySync = db.prepare(`SELECT sync_status, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} GROUP BY sync_status`).all();
+            const byProject = db.prepare(`SELECT project, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND project IS NOT NULL GROUP BY project ORDER BY c DESC`).all();
+            const bySource = db.prepare(`SELECT external_source, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND external_source IS NOT NULL GROUP BY external_source`).all();
+            const workCount = (db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND external_source = 'leantime'`).get() as { c: number }).c;
+            const personalCount = (db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND (external_source IS NULL OR external_source != 'leantime')`).get() as { c: number }).c;
+            const dirty = db.prepare(`SELECT id, title, sync_status, external_source FROM tasks WHERE ${unarchivedTasksWhere} AND sync_status IN ('dirty', 'conflict') ORDER BY priority`).all();
             return {
                 content: [{
                     type: "text",

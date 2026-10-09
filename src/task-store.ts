@@ -1,14 +1,15 @@
 /**
- * Read-side TaskStore adapter for the TypeScript runtimes (dashboard server and
- * MCP server). Mirrors the read surface of infra/scripts/utils/task_store.py:
+ * TaskStore adapter for the TypeScript runtimes (dashboard server, MCP server,
+ * owner CLI). Mirrors infra/scripts/utils/task_store.py (reads plus the task
+ * write surface: get, create, update, complete, archive, unarchive):
  *
  *   SOLO_EMPIRE_TASKS_BACKEND=sqlite   # default: the control-plane SQLite DB
  *   SOLO_EMPIRE_TASKS_BACKEND=api      # empire-platform Tasks API
  *   EMPIRE_TASKS_API=http://127.0.0.1:3601
  *   EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API=...  # or .runtime/automation-tokens/dashboard-api.jwt
  *
- * No other TypeScript file reads the task tables directly. Every method is
- * async because the API backend is. Lives under mcp-server/src so both
+ * No other TypeScript file reads or writes the task tables directly. Tasks are
+ * never hard-deleted; use archive(). Every method is async because the API backend is. Lives under mcp-server/src so both
  * `infra/tsconfig.json` (dashboard) and `infra/mcp-server/tsconfig.json`
  * (rootDir: src) can import it.
  */
@@ -18,7 +19,11 @@ import { fileURLToPath } from "node:url";
 
 /** Minimal better-sqlite3 surface so this module needs no native import. */
 export interface SqliteLike {
-    prepare(sql: string): { all(...params: any[]): any[]; get(...params: any[]): any };
+    prepare(sql: string): {
+        all(...params: any[]): any[];
+        get(...params: any[]): any;
+        run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
+    };
 }
 
 export const AUTOMATION_ID = "dashboard-api";
@@ -116,7 +121,70 @@ export interface TaskTypeRecord {
     [RAW]?: Record<string, any>;
 }
 
+/** Columns a writer may set through the store (same set as task_store.py FIELDS). */
+export interface TaskFields {
+    title?: string;
+    description?: string | null;
+    status?: string;
+    priority?: number;
+    project?: string | null;
+    tags?: string[] | string | null;
+    category?: string | null;
+    due_date?: string | null;
+    notes?: string | null;
+    estimated_minutes?: number | null;
+    actual_minutes?: number;
+    started_at?: string | null;
+    reminder_at?: string | null;
+    reminder_channels?: string | null;
+    recurrence_rule?: string | null;
+    external_url?: string | null;
+    calendar_event_id?: string | null;
+    progress_percent?: number;
+}
+
+/** create() also accepts the parent task number (the API takes its uuid, resolved by the adapter). */
+export interface TaskCreateFields extends TaskFields {
+    parent_task_id?: number | null;
+}
+
+/** SQLite-only bookkeeping columns (sync_status, completed_at, ...) a legacy writer sets; ignored by the API backend. */
+export type TaskLegacy = Record<string, string | number | null>;
+
+export interface RoleSuggestion {
+    task: number;
+    role_id: string;
+    confidence: string | null;
+    match_reason: string | null;
+    review_status: string;
+    source_registry: string | null;
+    updated_at: string | null;
+}
+
+export interface RoleSuggestionFilters {
+    task?: number;
+    role_id?: string;
+    source_registry?: string;
+    review_status?: string;
+    confidence?: string;
+}
+
 export interface TaskStore {
+    /**
+     * Runs fn while holding the per-backend lock, so a read-modify-write (or check-then-create)
+     * cannot interleave with another one on the same database or Tasks API. Not re-entrant.
+     */
+    exclusive<T>(fn: () => Promise<T>): Promise<T>;
+    /** One task by number, archived included; null when it does not exist. */
+    get(number: number): Promise<TaskRecord | null>;
+    /** Returns the new task number. */
+    create(fields: TaskCreateFields, opts?: { legacy?: TaskLegacy }): Promise<number>;
+    /** status 'done' goes through complete(); PATCH on the API cannot set it. */
+    update(number: number, fields: TaskFields, opts?: { legacy?: TaskLegacy }): Promise<void>;
+    complete(number: number, opts?: { legacy?: TaskLegacy }): Promise<void>;
+    archive(number: number, reason: string): Promise<void>;
+    unarchive(number: number): Promise<void>;
+    roleSuggestions(filters?: RoleSuggestionFilters): Promise<RoleSuggestion[]>;
     list(filters?: TaskFilters): Promise<TaskRecord[]>;
     stats(groupBy?: GroupBy | null, filters?: TaskFilters): Promise<TaskStats>;
     assignments(filters?: AssignmentFilters): Promise<TaskAssignment[]>;
@@ -128,6 +196,12 @@ const FILTER_KEYS = new Set([
     "due_before", "completed_between", "created_between", "reminder_due_before", "missing_calendar_event",
     "numbers", "parent", "q", "include_archived",
 ]);
+const FIELD_KEYS = new Set([
+    "title", "description", "status", "priority", "project", "tags", "category", "due_date", "notes",
+    "estimated_minutes", "actual_minutes", "started_at", "reminder_at", "reminder_channels",
+    "recurrence_rule", "external_url", "calendar_event_id", "progress_percent",
+]);
+const COLUMN_NAME = /^[a-z_][a-z0-9_]*$/;
 const GROUPS = new Set(["status", "priority", "project", "category"]);
 const ASSIGNEE_TO_API = { user: "identity", role: "role", team: "team" } as const;
 const ASSIGNEE_FROM_API: Record<string, TaskAssignment["assignee_type"]> = { identity: "user", role: "role", team: "team" };
@@ -135,6 +209,11 @@ const ASSIGNEE_FROM_API: Record<string, TaskAssignment["assignee_type"]> = { ide
 function checkFilters(filters: TaskFilters): void {
     const unknown = Object.keys(filters).filter((key) => !FILTER_KEYS.has(key));
     if (unknown.length) throw new Error(`unknown task filters: ${unknown.sort().join(", ")}`);
+}
+
+function checkFields(fields: object, allowed: Set<string>): void {
+    const unknown = Object.keys(fields).filter((key) => !allowed.has(key));
+    if (unknown.length) throw new Error(`unknown task fields: ${unknown.sort().join(", ")}`);
 }
 
 export function tagsList(value: unknown): string[] {
@@ -241,10 +320,36 @@ export function utcDate(offsetDays = 0, now: Date = new Date()): string {
     return new Date(now.getTime() + offsetDays * 86_400_000).toISOString().slice(0, 10);
 }
 
+// ─── Serialization ────────────────────────────────────────────
+
+/** Promise-chain mutex. Stores are created per request, so the lock is keyed by the shared resource. */
+class AsyncMutex {
+    private tail: Promise<unknown> = Promise.resolve();
+
+    run<T>(fn: () => Promise<T>): Promise<T> {
+        const result = this.tail.then(fn, fn);
+        this.tail = result.then(() => undefined, () => undefined);
+        return result;
+    }
+}
+
+const dbLocks = new WeakMap<object, AsyncMutex>();
+const apiLocks = new Map<string, AsyncMutex>();
+
+function lockFor<K>(map: { get(k: K): AsyncMutex | undefined; set(k: K, v: AsyncMutex): unknown }, key: K): AsyncMutex {
+    let lock = map.get(key);
+    if (!lock) { lock = new AsyncMutex(); map.set(key, lock); }
+    return lock;
+}
+
 // ─── SQLite backend ───────────────────────────────────────────
 
 export class SqliteTaskStore implements TaskStore {
     constructor(private readonly db: SqliteLike) {}
+
+    exclusive<T>(fn: () => Promise<T>): Promise<T> {
+        return lockFor(dbLocks, this.db as object).run(fn);
+    }
 
     private where(filters: TaskFilters): { sql: string; params: any[] } {
         checkFilters(filters);
@@ -280,14 +385,101 @@ export class SqliteTaskStore implements TaskStore {
         return { sql: clauses.join(" AND "), params };
     }
 
+    private static record(row: Record<string, any>): TaskRecord {
+        const record = toRecord({ ...row, number: row.id, parent_number: row.parent_task_id, parent_recurring_number: row.parent_recurring_id });
+        record[RAW] = { ...row };
+        return record;
+    }
+
     async list(filters: TaskFilters = {}): Promise<TaskRecord[]> {
         const { sql, params } = this.where(filters);
         const rows = this.db.prepare(`SELECT * FROM tasks WHERE ${sql} ORDER BY id`).all(...params);
-        return rows.map((row) => {
-            const record = toRecord({ ...row, number: row.id, parent_number: row.parent_task_id, parent_recurring_number: row.parent_recurring_id });
-            record[RAW] = { ...row };
-            return record;
-        });
+        return rows.map((row) => SqliteTaskStore.record(row));
+    }
+
+    async get(number: number): Promise<TaskRecord | null> {
+        const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(number);
+        return row ? SqliteTaskStore.record(row) : null;
+    }
+
+    private static values(fields: TaskCreateFields, legacy?: TaskLegacy): Record<string, any> {
+        const values: Record<string, any> = {};
+        for (const [key, value] of Object.entries(fields)) {
+            if (value === undefined) continue;
+            values[key] = key === "tags" && Array.isArray(value) ? JSON.stringify(value) : value;
+        }
+        for (const [key, value] of Object.entries(legacy ?? {})) {
+            if (!COLUMN_NAME.test(key)) throw new Error(`invalid legacy column ${JSON.stringify(key)}`);
+            values[key] = value;
+        }
+        return values;
+    }
+
+    /** `legacy` may carry SQLite-only columns, including explicit created_at/updated_at (else the column defaults apply). */
+    async create(fields: TaskCreateFields, { legacy }: { legacy?: TaskLegacy } = {}): Promise<number> {
+        checkFields(fields, new Set([...FIELD_KEYS, "parent_task_id"]));
+        const values = { status: "todo", ...SqliteTaskStore.values(fields, legacy) };
+        const columns = Object.keys(values);
+        const result = this.db.prepare(
+            `INSERT INTO tasks (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+        ).run(...Object.values(values));
+        return Number(result.lastInsertRowid);
+    }
+
+    async update(number: number, fields: TaskFields, { legacy }: { legacy?: TaskLegacy } = {}): Promise<void> {
+        checkFields(fields, FIELD_KEYS);
+        const values = SqliteTaskStore.values(fields, legacy);
+        if (values.status === "done") {
+            const { status: _status, ...rest } = values;
+            await this.complete(number, { legacy: Object.keys(rest).length ? rest : undefined });
+            return;
+        }
+        const columns = Object.keys(values);
+        if (!columns.length) return;
+        const stamp = "updated_at" in values ? "" : ", updated_at = datetime('now')";
+        this.db.prepare(`UPDATE tasks SET ${columns.map((column) => `${column} = ?`).join(", ")}${stamp} WHERE id = ?`)
+            .run(...Object.values(values), number);
+    }
+
+    async complete(number: number, { legacy }: { legacy?: TaskLegacy } = {}): Promise<void> {
+        const extra = SqliteTaskStore.values({}, legacy);
+        const hasCompleted = "completed_at" in extra;
+        const completedParams = hasCompleted ? [extra.completed_at] : [];
+        delete extra.completed_at;
+        const stamp = "updated_at" in extra ? "" : ", updated_at = datetime('now')";
+        const assignments = Object.keys(extra).map((column) => `, ${column} = ?`).join("");
+        this.db.prepare(
+            `UPDATE tasks SET status = 'done', completed_at = ${hasCompleted ? "?" : "COALESCE(completed_at, datetime('now'))"}${stamp}${assignments} WHERE id = ?`,
+        ).run(...completedParams, ...Object.values(extra), number);
+    }
+
+    async archive(number: number, reason: string): Promise<void> {
+        this.db.prepare(
+            "UPDATE tasks SET archived_at = COALESCE(archived_at, datetime('now')), archive_reason = ?, updated_at = datetime('now') WHERE id = ?",
+        ).run(reason, number);
+    }
+
+    async unarchive(number: number): Promise<void> {
+        this.db.prepare("UPDATE tasks SET archived_at = NULL, archive_reason = NULL, updated_at = datetime('now') WHERE id = ?").run(number);
+    }
+
+    async roleSuggestions(filters: RoleSuggestionFilters = {}): Promise<RoleSuggestion[]> {
+        const clauses = ["1 = 1"];
+        const params: any[] = [];
+        for (const [column, value] of [
+            ["task_id", filters.task], ["role_id", filters.role_id], ["source_registry", filters.source_registry],
+            ["review_status", filters.review_status], ["confidence", filters.confidence],
+        ] as const) {
+            if (value !== undefined && value !== null) { clauses.push(`${column} = ?`); params.push(value); }
+        }
+        const rows = this.db.prepare(
+            "SELECT task_id, role_id, confidence, match_reason, review_status, source_registry, updated_at"
+            + ` FROM task_role_suggestions WHERE ${clauses.join(" AND ")} ORDER BY task_id, role_id, id`,
+        ).all(...params);
+        return rows.map((row) => ({
+            task: row.task_id, role_id: row.role_id, confidence: row.confidence ?? null, match_reason: row.match_reason ?? null,
+            review_status: row.review_status, source_registry: row.source_registry ?? null, updated_at: row.updated_at ?? null,
+        }));
     }
 
     async stats(groupBy: GroupBy | null = null, filters: TaskFilters = {}): Promise<TaskStats> {
@@ -336,7 +528,7 @@ export class SqliteTaskStore implements TaskStore {
 
 // ─── API backend ──────────────────────────────────────────────
 
-export type FetchLike = (url: string, init: { method: string; headers: Record<string, string> }) => Promise<{
+export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<{
     ok: boolean;
     status: number;
     json(): Promise<any>;
@@ -366,27 +558,109 @@ export class ApiTaskStore implements TaskStore {
         this.baseUrl = baseUrl.replace(/\/+$/, "");
     }
 
-    private async call(path: string, params: Array<[string, string]>): Promise<any> {
+    exclusive<T>(fn: () => Promise<T>): Promise<T> {
+        return lockFor(apiLocks, this.baseUrl).run(fn);
+    }
+
+    /** uuid by task number; the write endpoints address tasks by uuid. */
+    private readonly ids = new Map<number, string>();
+
+    private async request(method: string, path: string, params: Array<[string, string]> = [], body?: unknown): Promise<any> {
         const query = params.length ? `?${new URLSearchParams(params).toString()}` : "";
         const doFetch: FetchLike = this.opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
+        const headers: Record<string, string> = {
+            Authorization: `Bearer ${this.token}`,
+            "X-Empire-Channel": this.opts.channel ?? "dashboard",
+            "X-Correlation-Id": this.opts.correlationId ?? "task-store",
+        };
+        if (body !== undefined) headers["Content-Type"] = "application/json";
         const response = await doFetch(`${this.baseUrl}${path}${query}`, {
-            method: "GET",
-            headers: {
-                Authorization: `Bearer ${this.token}`,
-                "X-Empire-Channel": this.opts.channel ?? "dashboard",
-                "X-Correlation-Id": this.opts.correlationId ?? "task-store",
-            },
+            method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         });
         if (!response.ok) {
             let reason = "error";
             try {
-                const body = await response.json();
-                const detail = body?.detail;
+                const parsed = await response.json();
+                const detail = parsed?.detail;
                 if (detail && typeof detail === "object") reason = detail.reason || detail.error || reason;
             } catch { /* keep generic reason */ }
             throw new TaskStoreError(response.status, reason);
         }
-        return response.json();
+        if (method === "GET") return response.json();
+        try { return await response.json(); } catch { return null; } // a write may answer with an empty body
+    }
+
+    private call(path: string, params: Array<[string, string]>): Promise<any> {
+        return this.request("GET", path, params);
+    }
+
+    private remember(task: any): TaskRecord {
+        this.ids.set(task.number, task.id);
+        return toRecord({ ...task, parent_number: task.parent_number, parent_recurring_number: task.parent_recurring_number });
+    }
+
+    private async uuid(number: number): Promise<string> {
+        if (!this.ids.has(number)) this.remember(await this.request("GET", `/v1/tasks/number/${number}`));
+        return this.ids.get(number) as string;
+    }
+
+    private async body(fields: TaskCreateFields): Promise<Record<string, any>> {
+        checkFields(fields, new Set([...FIELD_KEYS, "parent_task_id"]));
+        const body: Record<string, any> = {};
+        for (const [key, value] of Object.entries(fields)) if (value !== undefined) body[key] = value;
+        if ("tags" in body) body.tags = tagsList(body.tags);
+        if (body.due_date !== undefined && body.due_date !== null) body.due_date = dateOnly(body.due_date);
+        if (body.parent_task_id !== undefined && body.parent_task_id !== null) body.parent_task_id = await this.uuid(body.parent_task_id);
+        return body;
+    }
+
+    async get(number: number): Promise<TaskRecord | null> {
+        try {
+            return this.remember(await this.request("GET", `/v1/tasks/number/${number}`));
+        } catch (error) {
+            if (error instanceof TaskStoreError && error.status === 404) return null;
+            throw error;
+        }
+    }
+
+    async create(fields: TaskCreateFields, _opts: { legacy?: TaskLegacy } = {}): Promise<number> {
+        const body = await this.body(fields);
+        const status = body.status;
+        delete body.status;
+        const number = this.remember(await this.request("POST", "/v1/tasks", [], body)).id;
+        if (status && status !== "todo") await this.update(number, { status });
+        return number;
+    }
+
+    async update(number: number, fields: TaskFields, _opts: { legacy?: TaskLegacy } = {}): Promise<void> {
+        checkFields(fields, FIELD_KEYS);
+        const body = await this.body(fields);
+        const done = body.status === "done";
+        if (done) delete body.status;
+        if (Object.keys(body).length) await this.request("PATCH", `/v1/tasks/${await this.uuid(number)}`, [], body);
+        if (done) await this.complete(number);
+    }
+
+    async complete(number: number, _opts: { legacy?: TaskLegacy } = {}): Promise<void> {
+        await this.request("POST", `/v1/tasks/${await this.uuid(number)}/complete`);
+    }
+
+    async archive(number: number, reason: string): Promise<void> {
+        await this.request("POST", `/v1/tasks/${await this.uuid(number)}/archive`, [], { reason });
+    }
+
+    async unarchive(number: number): Promise<void> {
+        await this.request("POST", `/v1/tasks/${await this.uuid(number)}/unarchive`);
+    }
+
+    async roleSuggestions(filters: RoleSuggestionFilters = {}): Promise<RoleSuggestion[]> {
+        const params: Array<[string, string]> = [];
+        for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== null) params.push([key, String(value)]);
+        const items = await this.pages("/v1/task-role-suggestions", params, false, 500);
+        return items.map((item) => ({
+            task: item.task_number, role_id: item.role_id, confidence: item.confidence ?? null, match_reason: item.match_reason ?? null,
+            review_status: item.review_status, source_registry: item.source_registry ?? null, updated_at: item.updated_at ?? null,
+        }));
     }
 
     static params(filters: TaskFilters): Array<[string, string]> {
@@ -428,9 +702,7 @@ export class ApiTaskStore implements TaskStore {
 
     async list(filters: TaskFilters = {}): Promise<TaskRecord[]> {
         const items = await this.pages("/v1/tasks", ApiTaskStore.params(filters), true, 200);
-        return items.map((task) => toRecord({
-            ...task, parent_number: task.parent_number, parent_recurring_number: task.parent_recurring_number,
-        }));
+        return items.map((task) => this.remember(task));
     }
 
     async stats(groupBy: GroupBy | null = null, filters: TaskFilters = {}): Promise<TaskStats> {

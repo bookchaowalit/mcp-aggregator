@@ -1,11 +1,32 @@
 import { z } from "zod";
 import type { ToolContext } from "../tool-context.js";
-import { buildTaskUpdate, taskStatusSchema, unarchivedTasksWhere, type TaskStatus } from "../task-state.js";
+import { sqliteNow, taskStatusSchema, updateTask } from "../task-state.js";
+import { compareValues, legacyTaskRow, openTaskStore, type TaskRecord, type TaskStore } from "../task-store.js";
+
+const AUTOMATION = "legacy-mcp";
+const CHANNEL = "mcp";
+
+type Row = Record<string, any>;
+
+/** SQL GROUP BY over rows already in memory: [{<key>: value, c: count}] ordered by key (NULL first). */
+function groupCount(rows: Row[], key: string): Row[] {
+    const counts = new Map<unknown, number>();
+    for (const row of rows) counts.set(row[key] ?? null, (counts.get(row[key] ?? null) ?? 0) + 1);
+    return [...counts.entries()]
+        .sort(([a], [b]) => compareValues(a, b))
+        .map(([value, c]) => ({ [key]: value, c }));
+}
 
 export function registerTasksTools({
     server,
     getDb,
 }: Pick<ToolContext, "server" | "getDb">): void {
+
+    /** The SQLite connection is only needed (and opened) on the sqlite backend. */
+    async function openStore(): Promise<TaskStore> {
+        const sqlite = (process.env.SOLO_EMPIRE_TASKS_BACKEND || "sqlite") === "sqlite";
+        return openTaskStore(sqlite ? await getDb() : null, AUTOMATION, { channel: CHANNEL });
+    }
 
     server.tool(
         "list_tasks",
@@ -18,18 +39,16 @@ export function registerTasksTools({
             limit: z.number().min(1).max(100).default(50),
         },
         async (params) => {
-            const db = await getDb();
-            let sql = `SELECT * FROM tasks WHERE ${unarchivedTasksWhere}`;
-            const values: any[] = [];
-
-            if (params.status) { sql += " AND status = ?"; values.push(params.status); }
-            if (params.project) { sql += " AND project = ?"; values.push(params.project); }
-            if (params.priority) { sql += " AND priority = ?"; values.push(params.priority); }
-            if (params.parent_task_id !== undefined) { sql += " AND parent_task_id = ?"; values.push(params.parent_task_id); }
-            sql += " ORDER BY priority ASC, created_at DESC LIMIT ?";
-            values.push(params.limit);
-
-            const tasks = db.prepare(sql).all(...values);
+            const store = await openStore();
+            let found = await store.list({
+                ...(params.status ? { status: [params.status] } : {}),
+                ...(params.project ? { project: params.project } : {}),
+                ...(params.parent_task_id !== undefined ? { parent: params.parent_task_id } : {}),
+            });
+            if (params.priority) found = found.filter((task) => task.priority === params.priority);
+            // ORDER BY priority ASC, created_at DESC LIMIT ? (ties keep id order)
+            found.sort((a, b) => a.priority - b.priority || compareValues(b.created_at, a.created_at));
+            const tasks = found.slice(0, params.limit).map(legacyTaskRow);
             return {
                 content: [{ type: "text", text: JSON.stringify({ total: tasks.length, tasks }, null, 2) }],
             };
@@ -52,37 +71,49 @@ export function registerTasksTools({
             reuse_open: z.boolean().default(false).describe("Return an existing open task with the same title, project, and parent instead of creating a duplicate"),
         },
         async (params) => {
-            const db = await getDb();
+            const store = await openStore();
             const parentId = params.parent_task_id ?? null;
             if (parentId !== null) {
-                const parent = db.prepare(`SELECT id FROM tasks WHERE id = ? AND ${unarchivedTasksWhere}`).get(parentId);
-                if (!parent) {
+                const parent = await store.get(parentId);
+                if (!parent || parent.archived_at) {
                     return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Parent task ${parentId} not found` }) }] };
                 }
             }
-            if (params.reuse_open) {
-                const existing = db.prepare(`
-                    SELECT * FROM tasks
-                    WHERE ${unarchivedTasksWhere} AND status NOT IN ('done', 'cancelled')
-                      AND title = ? AND project IS ? AND parent_task_id IS ?
-                    ORDER BY id LIMIT 1
-                `).get(params.title, params.project || null, parentId);
-                if (existing) {
-                    return {
-                        content: [{ type: "text", text: JSON.stringify({ success: true, reused: true, task: existing, message: "Existing open task reused." }, null, 2) }],
-                    };
+            const outcome = await store.exclusive(async () => {
+                if (params.reuse_open) {
+                    const candidates = await store.list({
+                        q: params.title,
+                        ...(params.project ? { project: params.project } : {}),
+                        ...(parentId !== null ? { parent: parentId } : {}),
+                    });
+                    const existing = candidates.find((task: TaskRecord) =>
+                        !["done", "cancelled"].includes(task.status) && task.title === params.title
+                        && task.project === (params.project || null) && task.parent_task_id === parentId);
+                    if (existing) {
+                        return { reused: legacyTaskRow(existing) };
+                    }
                 }
+                const done = params.status === "done";
+                const number = await store.create({
+                    title: params.title,
+                    ...(params.description ? { description: params.description } : {}),
+                    status: params.status,
+                    priority: params.priority,
+                    ...(params.project ? { project: params.project } : {}),
+                    ...(params.category ? { category: params.category } : {}),
+                    ...(params.due_date ? { due_date: params.due_date } : {}),
+                    ...(params.tags ? { tags: params.tags.split(",").map(t => t.trim()) } : {}),
+                    ...(parentId !== null ? { parent_task_id: parentId } : {}),
+                }, { legacy: { sync_status: "local", progress_percent: done ? 100 : 0, ...(done ? { completed_at: sqliteNow() } : {}) } });
+                return { number };
+            });
+            if ("reused" in outcome) {
+                return {
+                    content: [{ type: "text", text: JSON.stringify({ success: true, reused: true, task: outcome.reused, message: "Existing open task reused." }, null, 2) }],
+                };
             }
-            const tagsJson = params.tags ? JSON.stringify(params.tags.split(",").map(t => t.trim())) : null;
-            const result = db.prepare(`
-                INSERT INTO tasks (title, description, status, priority, project, category, due_date, tags, progress_percent, completed_at, sync_status, created_at, updated_at, parent_task_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'done' THEN datetime('now') END, 'local', datetime('now'), datetime('now'), ?)
-            `).run(
-                params.title, params.description || null, params.status, params.priority,
-                params.project || null, params.category || null, params.due_date || null, tagsJson,
-                params.status === "done" ? 100 : 0, params.status, parentId
-            );
-            const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
+            const number = outcome.number;
+            const task = legacyTaskRow((await store.get(number)) as TaskRecord);
             return {
                 content: [{ type: "text", text: JSON.stringify({ success: true, task, message: "Task created locally. Personal sources can be synced separately." }, null, 2) }],
             };
@@ -103,20 +134,16 @@ export function registerTasksTools({
             append_notes: z.string().optional().describe("Text appended as a new line to the task notes, e.g. commit SHAs, review findings, models, metrics"),
         },
         async (params) => {
-            const db = await getDb();
+            const store = await openStore();
             const { id, ...fields } = params;
-            const existing = db.prepare("SELECT status FROM tasks WHERE id = ?").get(id) as { status: TaskStatus } | undefined;
-            if (!existing) {
+            const outcome = await updateTask(store, id, fields);
+            if (outcome === "missing") {
                 return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Task ${id} not found` }) }] };
             }
-
-            const update = buildTaskUpdate(fields, existing.status);
-            if (update.assignments.length === 0) {
+            if (outcome === "empty") {
                 return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: "No fields to update" }) }] };
             }
-
-            db.prepare(`UPDATE tasks SET ${update.assignments.join(", ")} WHERE id = ?`).run(...update.values, id);
-            const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+            const updated = legacyTaskRow((await store.get(id)) as TaskRecord);
             return {
                 content: [{ type: "text", text: JSON.stringify({ success: true, task: updated, message: "Task updated. Run sync to push changes." }, null, 2) }],
             };
@@ -128,14 +155,11 @@ export function registerTasksTools({
         "Mark a local task as done.",
         { id: z.number().describe("Task ID") },
         async (params) => {
-            const db = await getDb();
-            const existing = db.prepare("SELECT status FROM tasks WHERE id = ?").get(params.id) as { status: TaskStatus } | undefined;
-            if (!existing) {
+            const store = await openStore();
+            if ((await updateTask(store, params.id, { status: "done" })) === "missing") {
                 return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Task ${params.id} not found` }) }] };
             }
-            const update = buildTaskUpdate({ status: "done" }, existing.status);
-            db.prepare(`UPDATE tasks SET ${update.assignments.join(", ")} WHERE id = ?`).run(...update.values, params.id);
-            const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(params.id);
+            const updated = legacyTaskRow((await store.get(params.id)) as TaskRecord);
             return {
                 content: [{ type: "text", text: JSON.stringify({ success: true, task: updated }, null, 2) }],
             };
@@ -144,17 +168,17 @@ export function registerTasksTools({
 
     server.tool(
         "delete_task",
-        "Delete a local task. External employer records are managed outside Solo Empire.",
+        "Archive a local task (tasks are never hard-deleted; the archive reason is recorded). External employer records are managed outside Solo Empire.",
         { id: z.number().describe("Task ID") },
         async (params) => {
-            const db = await getDb();
-            const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(params.id) as any;
+            const store = await openStore();
+            const task = await store.get(params.id);
             if (!task) {
                 return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Task ${params.id} not found` }) }] };
             }
-            db.prepare("DELETE FROM tasks WHERE id = ?").run(params.id);
+            await store.archive(params.id, "deleted via MCP delete_task");
             return {
-                content: [{ type: "text", text: JSON.stringify({ success: true, deleted: task.title, warning: task.external_id ? "External record is managed outside Solo Empire" : undefined }, null, 2) }],
+                content: [{ type: "text", text: JSON.stringify({ success: true, deleted: task.title, archived: true, message: "Task archived (not hard-deleted); it is hidden from task lists.", warning: task.external_id ? "External record is managed outside Solo Empire" : undefined }, null, 2) }],
             };
         },
     );
@@ -164,15 +188,20 @@ export function registerTasksTools({
         "Show task sync status — personal sources (Todoist/Jira/Notion), sync state, and project. Employer work is external.",
         {},
         async () => {
-            const db = await getDb();
-            const total = db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere}`).get() as { c: number };
-            const byStatus = db.prepare(`SELECT status, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} GROUP BY status`).all();
-            const bySync = db.prepare(`SELECT sync_status, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} GROUP BY sync_status`).all();
-            const byProject = db.prepare(`SELECT project, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND project IS NOT NULL GROUP BY project ORDER BY c DESC`).all();
-            const bySource = db.prepare(`SELECT external_source, COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND external_source IS NOT NULL GROUP BY external_source`).all();
-            const workCount = (db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND external_source = 'leantime'`).get() as { c: number }).c;
-            const personalCount = (db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE ${unarchivedTasksWhere} AND (external_source IS NULL OR external_source != 'leantime')`).get() as { c: number }).c;
-            const dirty = db.prepare(`SELECT id, title, sync_status, external_source FROM tasks WHERE ${unarchivedTasksWhere} AND sync_status IN ('dirty', 'conflict') ORDER BY priority`).all();
+            const store = await openStore();
+            const rows = (await store.list()).map(legacyTaskRow);
+            const total = { c: rows.length };
+            const byStatus = groupCount(rows, "status");
+            const bySync = groupCount(rows, "sync_status");
+            const byProject = groupCount(rows.filter((row) => row.project !== null), "project")
+                .sort((a, b) => b.c - a.c);
+            const bySource = groupCount(rows.filter((row) => row.external_source !== null), "external_source");
+            const workCount = rows.filter((row) => row.external_source === "leantime").length;
+            const personalCount = rows.filter((row) => row.external_source === null || row.external_source !== "leantime").length;
+            const dirty = rows
+                .filter((row) => ["dirty", "conflict"].includes(row.sync_status))
+                .sort((a, b) => compareValues(a.priority, b.priority))
+                .map((row) => ({ id: row.id, title: row.title, sync_status: row.sync_status, external_source: row.external_source }));
             return {
                 content: [{
                     type: "text",

@@ -18,7 +18,7 @@ const dbPath = join(directory, "tasks.db");
 const db = new Database(dbPath);
 const schema = readFileSync(join(root, "infra", "database", "schema.sql"), "utf8");
 db.exec(schema.slice(schema.indexOf("CREATE TABLE tasks (")).split(";", 1)[0]);
-db.exec("CREATE TABLE task_role_suggestions (task_id INTEGER, role_id TEXT, review_status TEXT)");
+db.exec(schema.slice(schema.indexOf("CREATE TABLE task_role_suggestions (")).split(";", 1)[0]);
 mkdirSync(join(directory, "infra", "go", "task-sync"), { recursive: true });
 const server = new McpServer({ name: "task-fixture", version: "1.0.0" });
 const client = new Client({ name: "task-fixture-client", version: "1.0.0" });
@@ -203,4 +203,85 @@ test("reuse_open never matches across parent, project, closed, or archived tasks
     db.prepare("UPDATE tasks SET archived_at = datetime('now') WHERE id = ?").run(archived.id);
     assert.notEqual((await create({ title: "Reuse archived", reuse_open: true })).task.id, archived.id);
     assert.equal((await callTool("create_task", { title: "Under archived", parent_task_id: archived.id })).error, true);
+});
+
+test("delete_task archives instead of deleting and says so", async () => {
+    const created = (await callTool("create_task", { title: "Delete fixture", project: "del" })).data.task;
+    const deleted = await callTool("delete_task", { id: created.id });
+    assert.equal(deleted.error, false);
+    assert.equal(deleted.data.success, true);
+    assert.equal(deleted.data.deleted, "Delete fixture");
+    assert.equal(deleted.data.archived, true);
+    assert.match(deleted.data.message, /archived/);
+    const row = db.prepare("SELECT archived_at, archive_reason FROM tasks WHERE id=?").get(created.id) as any;
+    assert.ok(row.archived_at);
+    assert.equal(row.archive_reason, "deleted via MCP delete_task");
+    const listed = await callTool("list_tasks", { project: "del" });
+    assert.equal(listed.data.total, 0);
+});
+
+test("MCP create_task keeps explicit timestamps, sync state, tags, and list ordering", async () => {
+    const created = (await callTool("create_task", { title: "Row shape", tags: "a, b", priority: 2, category: "ops", due_date: "2026-10-31" })).data.task;
+    const row = db.prepare("SELECT * FROM tasks WHERE id=?").get(created.id) as any;
+    assert.deepEqual(created, row);
+    assert.equal(row.sync_status, "local");
+    assert.equal(row.tags, '["a","b"]');
+    assert.equal(row.progress_percent, 0);
+    assert.match(row.created_at, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+    assert.equal(row.created_at, row.updated_at);
+    const ordered = (await callTool("list_tasks", { limit: 100 })).data.tasks as Array<{ priority: number; created_at: string }>;
+    for (let i = 1; i < ordered.length; i++) assert.ok(ordered[i - 1].priority <= ordered[i].priority);
+});
+
+test("CLI add, update, done and list run against the temp database", () => {
+    const added = runCli("add", "--title", "CLI row", "--priority", "2", "--project", "cli-fixture", "--due", "2026-11-01");
+    assert.equal(added.status, 0, added.stderr);
+    const id = Number(/Task #(\d+) created: CLI row \(priority: 2\)/.exec(added.stdout)?.[1]);
+    assert.ok(id > 0);
+    assert.match(added.stdout, /Project: cli-fixture/);
+    const row = db.prepare("SELECT * FROM tasks WHERE id=?").get(id) as any;
+    assert.equal(row.sync_status, "local");
+    assert.equal(row.status, "todo");
+    assert.equal(row.due_date, "2026-11-01");
+    const child = runCli("add", "--title", "CLI child", "--parent", String(id));
+    assert.match(child.stdout, /Parent: #/);
+    assert.match(runCli("add", "--title", "Orphan", "--parent", "999999").stdout, /Parent task #999999 not found/);
+    assert.match(runCli("update", String(id), "--title", "CLI renamed", "--progress", "40").stdout, /updated/);
+    assert.deepEqual(
+        db.prepare("SELECT title, progress_percent, sync_status FROM tasks WHERE id=?").get(id),
+        { title: "CLI renamed", progress_percent: 40, sync_status: "dirty" },
+    );
+    assert.match(runCli("update", String(id)).stdout, /No fields to update/);
+    assert.match(runCli("update", "999999", "--title", "x").stdout, /Task #999999 not found/);
+    db.prepare("INSERT INTO task_role_suggestions (task_id, role_id, confidence, match_reason) VALUES (?, 'role-a', 'high', 'x')").run(id);
+    const listed = runCli("list", "--project", "cli-fixture");
+    assert.match(listed.stdout, new RegExp(`#${id} \\[P2\\] CLI renamed \\[cli-fixture\\]`));
+    assert.match(listed.stdout, /Role suggestions: role-a/);
+});
+
+test("concurrent MCP requests on one task do not lose updates", async () => {
+    const created = await callTool("create_task", { title: "race target", project: "race" });
+    const id = created.data.task.id as number;
+
+    // complete then reopen, fired together: the reopen must clear completed_at
+    await Promise.all([
+        callTool("complete_task", { id }),
+        callTool("update_task", { id, status: "todo" }),
+    ]);
+    const reopened = taskRow(id);
+    assert.equal(reopened.status, "todo");
+    assert.equal(reopened.completed_at, null);
+
+    // concurrent note appends must all be kept
+    await Promise.all(["note-a", "note-b", "note-c"].map((append_notes) => callTool("update_task", { id, append_notes })));
+    const notes = (db.prepare("SELECT notes FROM tasks WHERE id=?").get(id) as { notes: string }).notes.split("\n").sort();
+    assert.deepEqual(notes, ["note-a", "note-b", "note-c"]);
+});
+
+test("concurrent create_task with reuse_open creates one row", async () => {
+    const results = await Promise.all(Array.from({ length: 5 }, () =>
+        callTool("create_task", { title: "reuse race", project: "race2", reuse_open: true })));
+    assert.equal(results.filter((r) => r.data.reused === true).length, 4);
+    const count = db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE title='reuse race' AND project='race2'").get() as { c: number };
+    assert.equal(count.c, 1);
 });

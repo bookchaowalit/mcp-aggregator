@@ -15,6 +15,7 @@ import {
     sqlLike,
     type FetchLike,
 } from "../src/task-store.js";
+import { planTaskUpdate, updateTask } from "../src/task-state.js";
 import { registerCustomizationTools } from "../src/tools/customization.js";
 import { registerPerformanceTools } from "../src/tools/performance.js";
 
@@ -240,4 +241,167 @@ test("MCP run_custom_view, list_task_types and db_stats keep their old output", 
     assert.deepEqual(stats.by_priority, db.prepare("SELECT priority, COUNT(*) as count FROM tasks GROUP BY priority ORDER BY priority").all());
     assert.deepEqual(stats.top_projects, db.prepare(
         "SELECT project, COUNT(*) as count FROM tasks WHERE project IS NOT NULL GROUP BY project ORDER BY count DESC, project LIMIT 10").all());
+});
+
+test("sqlite backend writes: get, create, update, complete, archive, unarchive", async () => {
+    const db = fixture();
+    const store = openTaskStore(db, "owner-cli", { env: {} });
+    assert.equal((await store.get(999)), null);
+    assert.equal((await store.get(5))?.archived_at, "2026-09-10 00:00:00"); // archived tasks are readable
+    const number = await store.create({ title: "New", priority: 2, tags: ["x", "y"], parent_task_id: 1 }, { legacy: { sync_status: "local" } });
+    assert.equal(number, 6);
+    const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(number) as any;
+    assert.equal(row.status, "todo");
+    assert.equal(row.tags, '["x","y"]');
+    assert.equal(row.parent_task_id, 1);
+    assert.equal(row.sync_status, "local");
+    assert.match(row.created_at, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+    await assert.rejects(store.create({ bogus: 1 } as any), /unknown task fields/);
+    await assert.rejects(store.update(1, { parent_task_id: 2 } as any), /unknown task fields/);
+    await assert.rejects(store.update(1, {}, { legacy: { "x; DROP": 1 } }), /invalid legacy column/);
+
+    await store.update(number, { title: "Renamed", priority: 1 }, { legacy: { sync_status: "dirty" } });
+    let after = db.prepare("SELECT title, priority, sync_status, completed_at FROM tasks WHERE id = ?").get(number) as any;
+    assert.deepEqual(after, { title: "Renamed", priority: 1, sync_status: "dirty", completed_at: null });
+
+    await store.update(number, { status: "done" }, { legacy: { progress_percent: 100 } }); // done goes through complete
+    after = db.prepare("SELECT status, progress_percent, completed_at FROM tasks WHERE id = ?").get(number) as any;
+    assert.equal(after.status, "done");
+    assert.equal(after.progress_percent, 100);
+    assert.ok(after.completed_at);
+    db.prepare("UPDATE tasks SET completed_at = '2020-01-01' WHERE id = ?").run(number);
+    await store.complete(number);
+    assert.equal((db.prepare("SELECT completed_at FROM tasks WHERE id = ?").get(number) as any).completed_at, "2020-01-01");
+    await store.complete(number, { legacy: { completed_at: "2021-02-03 04:05:06" } });
+    assert.equal((db.prepare("SELECT completed_at FROM tasks WHERE id = ?").get(number) as any).completed_at, "2021-02-03 04:05:06");
+
+    await store.archive(number, "because");
+    const archived = db.prepare("SELECT archived_at, archive_reason FROM tasks WHERE id = ?").get(number) as any;
+    assert.ok(archived.archived_at);
+    assert.equal(archived.archive_reason, "because");
+    const firstStamp = archived.archived_at;
+    db.prepare("UPDATE tasks SET archived_at = '2020-05-05 00:00:00' WHERE id = ?").run(number);
+    await store.archive(number, "again"); // keeps the first archived_at
+    assert.equal((db.prepare("SELECT archived_at FROM tasks WHERE id = ?").get(number) as any).archived_at, "2020-05-05 00:00:00");
+    assert.ok(firstStamp);
+    assert.ok(!(await store.list()).some((t) => t.id === number));
+    await store.unarchive(number);
+    assert.deepEqual(db.prepare("SELECT archived_at, archive_reason FROM tasks WHERE id = ?").get(number), { archived_at: null, archive_reason: null });
+    assert.equal(db.prepare("SELECT count(*) AS c FROM tasks").get().c, 6); // nothing was deleted
+});
+
+test("planTaskUpdate and updateTask keep the old buildTaskUpdate rules", async () => {
+    assert.equal(planTaskUpdate({}, { status: "todo", notes: null }), null);
+    assert.equal(planTaskUpdate({ append_notes: "  " }, { status: "todo", notes: null }), null);
+    assert.deepEqual(planTaskUpdate({ progress_percent: 10 }, { status: "done", notes: null }), {
+        fields: { status: "done" }, legacy: { sync_status: "dirty", progress_percent: 100 },
+    });
+    assert.deepEqual(planTaskUpdate({ status: "todo", title: "t" }, { status: "done", notes: "n" })?.legacy, { sync_status: "dirty", completed_at: null });
+    assert.equal(planTaskUpdate({ append_notes: "b" }, { status: "todo", notes: "a" })?.fields.notes, "a\nb");
+    assert.equal(planTaskUpdate({ append_notes: "b" }, { status: "todo", notes: "" })?.fields.notes, "b");
+
+    const db = fixture();
+    const store = openTaskStore(db, "legacy-mcp", { env: {} });
+    assert.equal(await updateTask(store, 999, { title: "x" }), "missing");
+    assert.equal(await updateTask(store, 1, {}), "empty");
+    assert.equal(await updateTask(store, 1, { status: "done", progress_percent: 5, title: "Done now" }), "updated");
+    const row = db.prepare("SELECT title, status, progress_percent, completed_at, sync_status FROM tasks WHERE id = 1").get() as any;
+    assert.deepEqual({ ...row, completed_at: Boolean(row.completed_at) },
+        { title: "Done now", status: "done", progress_percent: 100, completed_at: true, sync_status: "dirty" });
+    await updateTask(store, 1, { status: "todo" });
+    assert.equal((db.prepare("SELECT completed_at FROM tasks WHERE id = 1").get() as any).completed_at, null);
+});
+
+function recordingFetch(responses: Array<{ status?: number; body?: any }>) {
+    const calls: Array<{ url: string; method: string; headers: Record<string, string>; body: any }> = [];
+    const fetch: FetchLike = async (url, init) => {
+        calls.push({ url, method: init.method, headers: init.headers, body: init.body === undefined ? undefined : JSON.parse(init.body) });
+        const next = responses.shift() ?? {};
+        const status = next.status ?? 200;
+        return { ok: status < 400, status, json: async () => { if (next.body === undefined) throw new Error("empty"); return next.body; } };
+    };
+    return { calls, fetch };
+}
+
+test("api backend writes: create, update, complete, archive, unarchive, get", async () => {
+    const parent = apiTask(1);
+    const child = apiTask(7);
+    const { calls, fetch } = recordingFetch([
+        { body: parent }, // parent lookup for create
+        { status: 201, body: child }, // POST /v1/tasks
+        { body: { ...child, status: "blocked" } }, // PATCH status
+        {}, // PATCH body
+        {}, // POST complete
+        {}, // POST archive
+        {}, // POST unarchive
+        { status: 404, body: { detail: { reason: "not_found" } } },
+        { body: apiTask(9, { archived_at: "2026-01-01T00:00:00Z" }) },
+    ]);
+    const store = openTaskStore(null, "owner-cli", {
+        channel: "cli", fetch,
+        env: { SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "http://t:1", EMPIRE_AUTOMATION_TOKEN_OWNER_CLI: "tok" },
+    });
+    const number = await store.create(
+        { title: "C", status: "blocked", tags: "a, b", due_date: "2026-10-09T10:00:00", parent_task_id: 1, priority: 2 },
+        { legacy: { sync_status: "local" } },
+    );
+    assert.equal(number, 7);
+    assert.equal(calls[0].url, "http://t:1/v1/tasks/number/1");
+    assert.equal(calls[1].method, "POST");
+    assert.equal(calls[1].url, "http://t:1/v1/tasks");
+    assert.deepEqual(calls[1].body, { title: "C", tags: ["a", "b"], due_date: "2026-10-09", parent_task_id: parent.id, priority: 2 });
+    assert.equal(calls[1].headers.Authorization, "Bearer tok");
+    assert.equal(calls[1].headers["X-Empire-Channel"], "cli");
+    assert.equal(calls[1].headers["Content-Type"], "application/json");
+    assert.equal(calls[2].method, "PATCH");
+    assert.equal(calls[2].url, `http://t:1/v1/tasks/${child.id}`);
+    assert.deepEqual(calls[2].body, { status: "blocked" });
+
+    await store.update(7, { status: "done", title: "T" }, { legacy: { sync_status: "dirty" } });
+    assert.equal(calls[3].method, "PATCH");
+    assert.deepEqual(calls[3].body, { title: "T" }); // PATCH never carries status=done, legacy never sent
+    assert.equal(calls[4].method, "POST");
+    assert.equal(calls[4].url, `http://t:1/v1/tasks/${child.id}/complete`);
+    assert.equal(calls[4].body, undefined);
+
+    await store.archive(7, "deleted via MCP delete_task");
+    assert.equal(calls[5].url, `http://t:1/v1/tasks/${child.id}/archive`);
+    assert.deepEqual(calls[5].body, { reason: "deleted via MCP delete_task" });
+    await store.unarchive(7);
+    assert.equal(calls[6].url, `http://t:1/v1/tasks/${child.id}/unarchive`);
+    assert.ok(calls.every((call) => call.method !== "DELETE"));
+
+    assert.equal(await store.get(8), null);
+    const found = await store.get(9);
+    assert.equal(found?.id, 9);
+    assert.equal(found?.archived_at, "2026-01-01T00:00:00Z");
+    assert.equal(calls[7].url, "http://t:1/v1/tasks/number/8");
+});
+
+test("api backend resolves a task uuid once and role suggestions page by offset", async () => {
+    const { calls, fetch } = recordingFetch([
+        { body: apiTask(3) }, {}, {},
+        { body: { items: [{ task_number: 3, role_id: "r", confidence: "high", match_reason: "m", review_status: "suggested", source_registry: "s", updated_at: null }] } },
+    ]);
+    const store = new ApiTaskStore("http://x", "t", { fetch });
+    await store.complete(3);
+    await store.archive(3, "r");
+    assert.equal(calls.filter((call) => call.url.endsWith("/v1/tasks/number/3")).length, 1);
+    const suggestions = await store.roleSuggestions({ review_status: "suggested" });
+    assert.deepEqual(suggestions.map((s) => [s.task, s.role_id]), [[3, "r"]]);
+    assert.equal(new URL(calls[3].url).pathname, "/v1/task-role-suggestions");
+    assert.equal(new URL(calls[3].url).searchParams.get("review_status"), "suggested");
+    const failing: FetchLike = async () => ({ ok: false, status: 403, json: async () => ({ detail: { reason: "forbidden" } }) });
+    await assert.rejects(new ApiTaskStore("http://x", "t", { fetch: failing }).archive(3, "r"), /403: forbidden/);
+});
+
+test("sqlite roleSuggestions matches the old query order", async () => {
+    const db = fixture();
+    db.exec(`CREATE TABLE task_role_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, role_id TEXT NOT NULL,
+        confidence TEXT, match_reason TEXT, review_status TEXT DEFAULT 'suggested', source_registry TEXT, updated_at TEXT)`);
+    const insert = db.prepare("INSERT INTO task_role_suggestions (task_id, role_id, confidence, match_reason, review_status, source_registry) VALUES (?, ?, 'high', 'm', ?, 's')");
+    insert.run(2, "b", "suggested"); insert.run(1, "z", "suggested"); insert.run(1, "a", "accepted"); insert.run(1, "c", "suggested");
+    const store = openTaskStore(db, "owner-cli", { env: {} });
+    assert.deepEqual((await store.roleSuggestions({ review_status: "suggested" })).map((s) => [s.task, s.role_id]), [[1, "c"], [1, "z"], [2, "b"]]);
+    assert.equal((await store.roleSuggestions()).length, 4);
 });

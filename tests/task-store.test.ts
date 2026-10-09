@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
@@ -9,6 +10,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
     ApiTaskStore,
+    automationToken,
+    clientSettings,
     legacyTaskRow,
     legacyTaskTypeRow,
     openTaskStore,
@@ -128,7 +131,7 @@ test("api backend builds list requests with auth, filters and cursor pagination"
     const { calls, fetch } = mockFetch([{ items: first }, { items: [apiTask(201, { parent_number: 7 })] }]);
     const store = openTaskStore(null, "dashboard-api", {
         channel: "dashboard", fetch,
-        env: { SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "http://tasks.test:3601/", EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API: "tok" },
+        env: { SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "https://tasks.test:3601/", EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API: "tok" },
     });
     const tasks = await store.list({ project: "p 1", status: ["todo", "done"], include_archived: true, priority_max: 2 });
     assert.equal(tasks.length, 201);
@@ -137,7 +140,7 @@ test("api backend builds list requests with auth, filters and cursor pagination"
     assert.deepEqual(tasks[0].tags, ["a"]);
     assert.equal(calls.length, 2);
     const url = new URL(calls[0].url);
-    assert.equal(`${url.origin}${url.pathname}`, "http://tasks.test:3601/v1/tasks");
+    assert.equal(`${url.origin}${url.pathname}`, "https://tasks.test:3601/v1/tasks");
     assert.deepEqual(url.searchParams.getAll("status"), ["todo", "done"]);
     assert.equal(url.searchParams.get("project"), "p 1");
     assert.equal(url.searchParams.get("include_archived"), "true");
@@ -339,43 +342,43 @@ test("api backend writes: create, update, complete, archive, unarchive, get", as
     ]);
     const store = openTaskStore(null, "owner-cli", {
         channel: "cli", fetch,
-        env: { SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "http://t:1", EMPIRE_AUTOMATION_TOKEN_OWNER_CLI: "tok" },
+        env: { SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "https://t:1", EMPIRE_AUTOMATION_TOKEN_OWNER_CLI: "tok" },
     });
     const number = await store.create(
         { title: "C", status: "blocked", tags: "a, b", due_date: "2026-10-09T10:00:00", parent_task_id: 1, priority: 2 },
         { legacy: { sync_status: "local" } },
     );
     assert.equal(number, 7);
-    assert.equal(calls[0].url, "http://t:1/v1/tasks/number/1");
+    assert.equal(calls[0].url, "https://t:1/v1/tasks/number/1");
     assert.equal(calls[1].method, "POST");
-    assert.equal(calls[1].url, "http://t:1/v1/tasks");
+    assert.equal(calls[1].url, "https://t:1/v1/tasks");
     assert.deepEqual(calls[1].body, { title: "C", tags: ["a", "b"], due_date: "2026-10-09", parent_task_id: parent.id, priority: 2 });
     assert.equal(calls[1].headers.Authorization, "Bearer tok");
     assert.equal(calls[1].headers["X-Empire-Channel"], "cli");
     assert.equal(calls[1].headers["Content-Type"], "application/json");
     assert.equal(calls[2].method, "PATCH");
-    assert.equal(calls[2].url, `http://t:1/v1/tasks/${child.id}`);
+    assert.equal(calls[2].url, `https://t:1/v1/tasks/${child.id}`);
     assert.deepEqual(calls[2].body, { status: "blocked" });
 
     await store.update(7, { status: "done", title: "T" }, { legacy: { sync_status: "dirty" } });
     assert.equal(calls[3].method, "PATCH");
     assert.deepEqual(calls[3].body, { title: "T" }); // PATCH never carries status=done, legacy never sent
     assert.equal(calls[4].method, "POST");
-    assert.equal(calls[4].url, `http://t:1/v1/tasks/${child.id}/complete`);
+    assert.equal(calls[4].url, `https://t:1/v1/tasks/${child.id}/complete`);
     assert.equal(calls[4].body, undefined);
 
     await store.archive(7, "deleted via MCP delete_task");
-    assert.equal(calls[5].url, `http://t:1/v1/tasks/${child.id}/archive`);
+    assert.equal(calls[5].url, `https://t:1/v1/tasks/${child.id}/archive`);
     assert.deepEqual(calls[5].body, { reason: "deleted via MCP delete_task" });
     await store.unarchive(7);
-    assert.equal(calls[6].url, `http://t:1/v1/tasks/${child.id}/unarchive`);
+    assert.equal(calls[6].url, `https://t:1/v1/tasks/${child.id}/unarchive`);
     assert.ok(calls.every((call) => call.method !== "DELETE"));
 
     assert.equal(await store.get(8), null);
     const found = await store.get(9);
     assert.equal(found?.id, 9);
     assert.equal(found?.archived_at, "2026-01-01T00:00:00Z");
-    assert.equal(calls[7].url, "http://t:1/v1/tasks/number/8");
+    assert.equal(calls[7].url, "https://t:1/v1/tasks/number/8");
 });
 
 test("api backend resolves a task uuid once and role suggestions page by offset", async () => {
@@ -404,4 +407,95 @@ test("sqlite roleSuggestions matches the old query order", async () => {
     const store = openTaskStore(db, "owner-cli", { env: {} });
     assert.deepEqual((await store.roleSuggestions({ review_status: "suggested" })).map((s) => [s.task, s.role_id]), [[1, "c"], [1, "z"], [2, "b"]]);
     assert.equal((await store.roleSuggestions()).length, 4);
+});
+
+// ─── Client config file ───────────────────────────────────────
+
+function clientFile(content: string | null, mode = 0o600) {
+    const dir = mkdtempSync(join(tmpdir(), "client-config-"));
+    const path = join(dir, "client.env");
+    if (content !== null) {
+        writeFileSync(path, content);
+        chmodSync(path, mode);
+    }
+    return { path, env: { EMPIRE_CLIENT_CONFIG: path } as NodeJS.ProcessEnv };
+}
+
+test("client config: a missing file means sqlite", () => {
+    const { env } = clientFile(null);
+    const settings = clientSettings(env);
+    assert.equal(settings.backend, "sqlite");
+    assert.equal(settings.apiUrl, "http://127.0.0.1:3601");
+});
+
+test("client config: the file selects api and ignores other keys", () => {
+    const { env } = clientFile('# note\n\nSOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API="https://tasks.example.com"\nOTHER=x\n');
+    const settings = clientSettings(env);
+    assert.deepEqual([settings.backend, settings.apiUrl, settings.backendSource], ["api", "https://tasks.example.com", "file"]);
+    const store = openTaskStore(null, "dashboard-api", { env: { ...env, EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API: "t" } });
+    assert.ok(store instanceof ApiTaskStore);
+});
+
+test("client config: a non-empty env var beats the file, an empty one does not", () => {
+    const { env } = clientFile("SOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API=https://a.example.com\n");
+    const winner = clientSettings({ ...env, SOLO_EMPIRE_TASKS_BACKEND: "sqlite", EMPIRE_TASKS_API: "http://b.test" });
+    assert.deepEqual([winner.backend, winner.apiUrl], ["sqlite", "http://b.test"]);
+    assert.equal(clientSettings({ ...env, SOLO_EMPIRE_TASKS_BACKEND: "" }).backend, "api");
+});
+
+test("client config: group/world accessible files are refused", () => {
+    for (const mode of [0o640, 0o604, 0o620, 0o666]) {
+        const { env } = clientFile("SOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API=https://a.example.com\n", mode);
+        assert.throws(() => clientSettings(env), /refusing client config/);
+        assert.throws(() => openTaskStore(null, "dashboard-api", { env }), /refusing client config/);
+    }
+});
+
+test("client config: api without a usable URL is refused", () => {
+    assert.throws(() => clientSettings(clientFile("SOLO_EMPIRE_TASKS_BACKEND=api\n").env), /sets no EMPIRE_TASKS_API/);
+    assert.throws(
+        () => clientSettings(clientFile("SOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API=ftp://x\n").env),
+        /https URL/,
+    );
+});
+
+test("client config: non-https API URLs are refused unless the host is loopback", () => {
+    for (const url of ["http://tasks.example.com", "http://10.0.0.5:3601", "http://127.0.0.1@evil.example.com",
+        "http://localhost.evil.example.com", "https://", "ws://127.0.0.1"]) {
+        assert.throws(() => clientSettings(clientFile(`SOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API=${url}\n`).env), /EMPIRE_TASKS_API/, url);
+        assert.throws(() => clientSettings({ ...clientFile(null).env, SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: url }), /EMPIRE_TASKS_API/, url);
+    }
+    for (const url of ["http://127.0.0.1:3601", "http://[::1]:3601", "http://localhost:3601", "https://tasks.example.com"]) {
+        assert.equal(clientSettings({ ...clientFile(null).env, SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: url }).apiUrl, url);
+    }
+});
+
+test("api store refuses redirects so the Bearer token is never forwarded", async () => {
+    const seen: any[] = [];
+    const fetcher: FetchLike = async (_url, init) => {
+        seen.push(init);
+        return { ok: true, status: 200, json: async () => ({}) };
+    };
+    await new ApiTaskStore("http://127.0.0.1:1", "t", { fetch: fetcher }).archive(3, "r").catch(() => undefined);
+    assert.equal(seen[0].redirect, "error");
+});
+
+test("token lookup: repo dir first, then ~/.config/empire-platform/tokens; loose modes refused", () => {
+    const root = mkdtempSync(join(tmpdir(), "tok-root-"));
+    const home = mkdtempSync(join(tmpdir(), "tok-home-"));
+    const homeDir = join(home, ".config", "empire-platform", "tokens");
+    const repoDir = join(root, ".runtime", "automation-tokens");
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(repoDir, { recursive: true });
+    assert.throws(() => automationToken("probe", {}, root, home), /no token/);
+    writeFileSync(join(homeDir, "probe.jwt"), "home-token\n", { mode: 0o600 });
+    assert.equal(automationToken("probe", {}, root, home), "home-token");
+    writeFileSync(join(repoDir, "probe.jwt"), "repo-token", { mode: 0o600 });
+    assert.equal(automationToken("probe", {}, root, home), "repo-token");
+    rmSync(join(repoDir, "probe.jwt"));
+    for (const mode of [0o640, 0o604, 0o644]) {
+        chmodSync(join(homeDir, "probe.jwt"), mode);
+        assert.throws(() => automationToken("probe", {}, root, home), (e: Error) => /refusing token file/.test(e.message) && !e.message.includes("home-token"));
+    }
+    assert.equal(automationToken("probe", { EMPIRE_AUTOMATION_TOKEN_PROBE: "env-token" }, root, home), "env-token");
 });

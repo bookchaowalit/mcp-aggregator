@@ -8,12 +8,17 @@
  *   EMPIRE_TASKS_API=http://127.0.0.1:3601
  *   EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API=...  # or .runtime/automation-tokens/dashboard-api.jwt
  *
+ * Both switch values may also come from the owner-only client file
+ * (~/.config/empire-platform/client.env, or $EMPIRE_CLIENT_CONFIG): a non-empty
+ * env var wins, then the file, then the default. See clientSettings().
+ *
  * No other TypeScript file reads or writes the task tables directly. Tasks are
  * never hard-deleted; use archive(). Every method is async because the API backend is. Lives under mcp-server/src so both
  * `infra/tsconfig.json` (dashboard) and `infra/mcp-server/tsconfig.json`
  * (rootDir: src) can import it.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -528,7 +533,7 @@ export class SqliteTaskStore implements TaskStore {
 
 // ─── API backend ──────────────────────────────────────────────
 
-export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<{
+export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string; redirect?: "error" }) => Promise<{
     ok: boolean;
     status: number;
     json(): Promise<any>;
@@ -575,7 +580,8 @@ export class ApiTaskStore implements TaskStore {
         };
         if (body !== undefined) headers["Content-Type"] = "application/json";
         const response = await doFetch(`${this.baseUrl}${path}${query}`, {
-            method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+            method, headers, redirect: "error", // never forward the Bearer token to a redirect target
+            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         });
         if (!response.ok) {
             let reason = "error";
@@ -742,12 +748,101 @@ export class ApiTaskStore implements TaskStore {
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
-export function automationToken(name: string, env: NodeJS.ProcessEnv = process.env, root: string = REPO_ROOT): string {
+/** Token files are looked up in <repo>/.runtime/automation-tokens, then ~/.config/empire-platform/tokens. */
+export function automationToken(
+    name: string, env: NodeJS.ProcessEnv = process.env, root: string = REPO_ROOT, home: string = homedir(),
+): string {
     const key = "EMPIRE_AUTOMATION_TOKEN_" + name.toUpperCase().replace(/-/g, "_");
     if (env[key]) return env[key] as string;
-    const path = resolve(root, ".runtime", "automation-tokens", `${name}.jwt`);
-    if (existsSync(path)) return readFileSync(path, "utf8").trim();
-    throw new Error(`no token for automation ${JSON.stringify(name)}: set ${key} or create ${path}`);
+    const first = resolve(root, ".runtime", "automation-tokens", `${name}.jwt`);
+    for (const path of [first, resolve(home, ".config", "empire-platform", "tokens", `${name}.jwt`)]) {
+        if (!existsSync(path)) continue;
+        const mode = statSync(path).mode;
+        if (mode & 0o077) throw new Error(`refusing token file ${path}: mode ${(mode & 0o777).toString(8)} is group/world accessible; run chmod 600`);
+        return readFileSync(path, "utf8").trim();
+    }
+    throw new Error(`no token for automation ${JSON.stringify(name)}: set ${key} or create ${first}`);
+}
+
+/** https, or http to a loopback host only; the message never echoes the URL (it may carry credentials). */
+export function validateApiUrl(url: string): string {
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw new Error("EMPIRE_TASKS_API is not a valid URL");
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol === "https:" && host) return url;
+    if (parsed.protocol === "http:" && ["127.0.0.1", "[::1]", "::1", "localhost"].includes(host)) return url;
+    throw new Error("EMPIRE_TASKS_API must be an https URL (http only for 127.0.0.1, ::1 or localhost)");
+}
+
+// ─── Client config file ───────────────────────────────────────
+
+const DEFAULT_TASKS_API = "http://127.0.0.1:3601";
+const CLIENT_KEYS = ["SOLO_EMPIRE_TASKS_BACKEND", "EMPIRE_TASKS_API"];
+
+export interface ClientSettings {
+    backend: string;
+    apiUrl: string;
+    backendSource: "env" | "file" | "default";
+    apiUrlSource: "env" | "file" | "default";
+    path: string;
+}
+
+export function clientConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+    const override = (env.EMPIRE_CLIENT_CONFIG || "").trim();
+    return override ? resolve(override) : resolve(homedir(), ".config", "empire-platform", "client.env");
+}
+
+function readClientFile(path: string): Record<string, string> {
+    let mode: number;
+    try {
+        mode = statSync(path).mode;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+        throw error;
+    }
+    if (mode & 0o077) {
+        throw new Error(`refusing client config ${path}: mode ${(mode & 0o777).toString(8)} is group/world accessible; run chmod 600`);
+    }
+    const values: Record<string, string> = {};
+    for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || line.startsWith("#") || !line.includes("=")) continue;
+        const at = line.indexOf("=");
+        const key = line.slice(0, at).trim();
+        let value = line.slice(at + 1).trim();
+        if (value.length >= 2 && value[0] === value[value.length - 1] && (value[0] === '"' || value[0] === "'")) value = value.slice(1, -1);
+        if (CLIENT_KEYS.includes(key)) values[key] = value;
+    }
+    return values;
+}
+
+/** Effective backend and API URL: non-empty env, else the client file, else the default. Never a token. */
+export function clientSettings(env: NodeJS.ProcessEnv = process.env): ClientSettings {
+    const path = clientConfigPath(env);
+    const file = readClientFile(path);
+    const pick = (key: string): [string, "env" | "file" | "default"] => {
+        if ((env[key] || "").trim()) return [(env[key] as string).trim(), "env"];
+        if (file[key]) return [file[key], "file"];
+        return ["", "default"];
+    };
+    const [rawBackend, backendSource] = pick("SOLO_EMPIRE_TASKS_BACKEND");
+    const [rawUrl, apiUrlSource] = pick("EMPIRE_TASKS_API");
+    const backend = rawBackend || "sqlite";
+    let apiUrl = rawUrl;
+    if (backend === "api") {
+        if (backendSource === "file" && apiUrlSource === "default") {
+            throw new Error(`client config ${path} selects the api backend but sets no EMPIRE_TASKS_API`);
+        }
+        apiUrl = apiUrl || DEFAULT_TASKS_API;
+        validateApiUrl(apiUrl);
+    } else {
+        apiUrl = apiUrl || DEFAULT_TASKS_API;
+    }
+    return { backend, apiUrl, backendSource, apiUrlSource, path };
 }
 
 export function openTaskStore(
@@ -756,13 +851,13 @@ export function openTaskStore(
     opts: { channel?: string; env?: NodeJS.ProcessEnv; fetch?: FetchLike } = {},
 ): TaskStore {
     const env = opts.env ?? process.env;
-    const backend = env.SOLO_EMPIRE_TASKS_BACKEND || "sqlite";
+    const { backend, apiUrl } = clientSettings(env);
     if (backend === "sqlite") {
         if (!db) throw new Error("the sqlite backend needs a connection");
         return new SqliteTaskStore(db);
     }
     if (backend === "api") {
-        return new ApiTaskStore(env.EMPIRE_TASKS_API || "http://127.0.0.1:3601", automationToken(automation, env), {
+        return new ApiTaskStore(apiUrl, automationToken(automation, env), {
             channel: opts.channel, fetch: opts.fetch,
         });
     }

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { compareValues, legacyTaskRow, legacyTaskTypeRow, openTaskStore, sqlLike } from "../task-store.js";
 
 export function registerCustomizationTools({
     server,
@@ -58,7 +59,7 @@ export function registerCustomizationTools({
         {},
         async () => {
             const db = await getDb();
-            const types = db.prepare("SELECT * FROM task_types WHERE is_active = 1 ORDER BY sort_order").all();
+            const types = (await openTaskStore(db, "dashboard-api", { channel: "mcp" }).taskTypes()).map(legacyTaskTypeRow);
             return { content: [{ type: "text", text: JSON.stringify({ task_types: types }, null, 2) }] };
         },
     );
@@ -88,34 +89,38 @@ export function registerCustomizationTools({
             if (!view) return { content: [{ type: "text", text: JSON.stringify({ error: "View not found" }) }] };
 
             let filter = view.filter_criteria ? JSON.parse(view.filter_criteria) : {};
-            let sql = "SELECT * FROM tasks WHERE archived_at IS NULL";
-            const params: any[] = [];
+            const store = openTaskStore(db, "dashboard-api", { channel: "mcp" });
+            let tasks = (await store.list(filter.project ? { project: filter.project } : {})).map(legacyTaskRow);
 
             if (filter.status) {
                 const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-                sql += ` AND status IN (${statuses.map(() => "?").join(",")})`;
-                params.push(...statuses);
+                tasks = tasks.filter((task) => statuses.includes(task.status));
             }
             if (filter.priority) {
                 const priorities = Array.isArray(filter.priority) ? filter.priority : [filter.priority];
-                sql += ` AND priority IN (${priorities.map(() => "?").join(",")})`;
-                params.push(...priorities);
+                tasks = tasks.filter((task) => priorities.includes(task.priority));
             }
-            if (filter.project) { sql += " AND project = ?"; params.push(filter.project); }
             if (filter.tags) {
                 const tags = Array.isArray(filter.tags) ? filter.tags : [filter.tags];
-                tags.forEach((t: string) => { sql += " AND tags LIKE ?"; params.push(`%${t}%`); });
+                tasks = tasks.filter((task) => tags.every((t: string) => sqlLike(task.tags, `%${t}%`)));
             }
 
             // Sort
             let sort = view.sort_criteria ? JSON.parse(view.sort_criteria) : null;
+            const keys: Array<[string, number]> = [["priority", 1], ["due_date", 1]];
             if (sort && sort.field) {
-                sql += ` ORDER BY ${sort.field} ${sort.direction || "ASC"}`;
-            } else {
-                sql += " ORDER BY priority, due_date";
+                const direction = String(sort.direction || "ASC").toUpperCase();
+                if (direction !== "ASC" && direction !== "DESC") throw new Error(`invalid sort direction: ${sort.direction}`);
+                if (tasks.length && !(sort.field in tasks[0])) throw new Error(`invalid sort field: ${sort.field}`);
+                keys.splice(0, keys.length, [sort.field, direction === "DESC" ? -1 : 1]);
             }
-
-            const tasks = db.prepare(sql).all(...params);
+            tasks.sort((a, b) => {
+                for (const [field, sign] of keys) {
+                    const order = compareValues(a[field], b[field]) * sign;
+                    if (order) return order;
+                }
+                return a.id - b.id;
+            });
             return { content: [{ type: "text", text: JSON.stringify({ view: view.name, task_count: tasks.length, tasks }, null, 2) }] };
         },
     );

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { compareValues, openTaskStore } from "../task-store.js";
 
 export function registerPerformanceTools({
     server,
@@ -23,10 +24,18 @@ export function registerPerformanceTools({
             const dbSize = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
             const tableCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as any).c;
             const indexCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").get() as any).c;
-            const taskCount = (db.prepare("SELECT COUNT(*) as c FROM tasks").get() as any).c;
-            const byStatus = db.prepare("SELECT status, COUNT(*) as count FROM tasks GROUP BY status").all();
-            const byPriority = db.prepare("SELECT priority, COUNT(*) as count FROM tasks GROUP BY priority ORDER BY priority").all();
-            const byProject = db.prepare("SELECT project, COUNT(*) as count FROM tasks WHERE project IS NOT NULL GROUP BY project ORDER BY count DESC LIMIT 10").all();
+            const store = openTaskStore(db, "dashboard-api", { channel: "mcp" });
+            const taskCount = (await store.stats(null, { include_archived: true })).total;
+            const byStatus = (await store.stats("status", { include_archived: true })).groups
+                .map((group) => ({ status: group.key, count: group.count }));
+            const byPriority = (await store.stats("priority", { include_archived: true })).groups
+                .map((group) => ({ priority: group.key === null ? null : Number(group.key), count: group.count }))
+                .sort((a, b) => compareValues(a.priority, b.priority));
+            const byProject = (await store.stats("project", { include_archived: true })).groups
+                .filter((group) => group.key !== null)
+                .map((group) => ({ project: group.key, count: group.count }))
+                .sort((a, b) => b.count - a.count)
+                .slice(0, 10);
             return {
                 content: [{
                     type: "text",
@@ -54,7 +63,7 @@ export function registerPerformanceTools({
         async ({ snapshot_type }) => {
             const db = await getDb();
             const dbSize = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
-            const taskCount = (db.prepare("SELECT COUNT(*) as c FROM tasks").get() as any).c;
+            const taskCount = (await openTaskStore(db, "dashboard-api", { channel: "mcp" }).stats(null, { include_archived: true })).total;
             const tableCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as any).c;
             const indexCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").get() as any).c;
             const metrics = JSON.stringify({ db_size: dbSize.size, tasks: taskCount, tables: tableCount, indexes: indexCount });

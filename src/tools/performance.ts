@@ -24,7 +24,7 @@ export function registerPerformanceTools({
             const dbSize = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
             const tableCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as any).c;
             const indexCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").get() as any).c;
-            const store = openTaskStore(db, "dashboard-api", { channel: "mcp" });
+            const store = openTaskStore("dashboard-api", { channel: "mcp" });
             const taskCount = (await store.stats(null, { include_archived: true })).total;
             const byStatus = (await store.stats("status", { include_archived: true })).groups
                 .map((group) => ({ status: group.key, count: group.count }));
@@ -63,7 +63,7 @@ export function registerPerformanceTools({
         async ({ snapshot_type }) => {
             const db = await getDb();
             const dbSize = db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()").get() as any;
-            const taskCount = (await openTaskStore(db, "dashboard-api", { channel: "mcp" }).stats(null, { include_archived: true })).total;
+            const taskCount = (await openTaskStore("dashboard-api", { channel: "mcp" }).stats(null, { include_archived: true })).total;
             const tableCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as any).c;
             const indexCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").get() as any).c;
             const metrics = JSON.stringify({ db_size: dbSize.size, tasks: taskCount, tables: tableCount, indexes: indexCount });

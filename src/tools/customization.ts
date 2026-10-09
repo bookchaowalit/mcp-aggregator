@@ -59,7 +59,7 @@ export function registerCustomizationTools({
         {},
         async () => {
             const db = await getDb();
-            const types = (await openTaskStore(db, "dashboard-api", { channel: "mcp" }).taskTypes()).map(legacyTaskTypeRow);
+            const types = (await openTaskStore("dashboard-api", { channel: "mcp" }).taskTypes()).map(legacyTaskTypeRow);
             return { content: [{ type: "text", text: JSON.stringify({ task_types: types }, null, 2) }] };
         },
     );
@@ -89,7 +89,7 @@ export function registerCustomizationTools({
             if (!view) return { content: [{ type: "text", text: JSON.stringify({ error: "View not found" }) }] };
 
             let filter = view.filter_criteria ? JSON.parse(view.filter_criteria) : {};
-            const store = openTaskStore(db, "dashboard-api", { channel: "mcp" });
+            const store = openTaskStore("dashboard-api", { channel: "mcp" });
             let tasks = (await store.list(filter.project ? { project: filter.project } : {})).map(legacyTaskRow);
 
             if (filter.status) {

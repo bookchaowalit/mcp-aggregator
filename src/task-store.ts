@@ -3,14 +3,13 @@
  * owner CLI). Mirrors infra/scripts/utils/task_store.py (reads plus the task
  * write surface: get, create, update, complete, archive, unarchive):
  *
- *   SOLO_EMPIRE_TASKS_BACKEND=sqlite   # default: the control-plane SQLite DB
- *   SOLO_EMPIRE_TASKS_BACKEND=api      # empire-platform Tasks API
- *   EMPIRE_TASKS_API=http://127.0.0.1:3601
+ *   SOLO_EMPIRE_TASKS_BACKEND=api      # required; "sqlite" was retired on 2026-10-09
+ *   EMPIRE_TASKS_API=https://...       # required, no default
  *   EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API=...  # or .runtime/automation-tokens/dashboard-api.jwt
  *
  * Both switch values may also come from the owner-only client file
  * (~/.config/empire-platform/client.env, or $EMPIRE_CLIENT_CONFIG): a non-empty
- * env var wins, then the file, then the default. See clientSettings().
+ * env var wins, then the file; nothing configured is an error. See clientSettings().
  *
  * No other TypeScript file reads or writes the task tables directly. Tasks are
  * never hard-deleted; use archive(). Every method is async because the API backend is. Lives under mcp-server/src so both
@@ -22,18 +21,9 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Minimal better-sqlite3 surface so this module needs no native import. */
-export interface SqliteLike {
-    prepare(sql: string): {
-        all(...params: any[]): any[];
-        get(...params: any[]): any;
-        run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
-    };
-}
-
 export const AUTOMATION_ID = "dashboard-api";
 
-/** Raw legacy row/table data a record was built from (SQLite backend only). */
+/** Raw legacy row/table data a record was built from (SQLite test double only). */
 export const RAW: unique symbol = Symbol("task-store.raw");
 
 export interface TaskRecord {
@@ -201,22 +191,20 @@ const FILTER_KEYS = new Set([
     "due_before", "completed_between", "created_between", "reminder_due_before", "missing_calendar_event",
     "numbers", "parent", "q", "include_archived",
 ]);
-const FIELD_KEYS = new Set([
+export const FIELD_KEYS = new Set([
     "title", "description", "status", "priority", "project", "tags", "category", "due_date", "notes",
     "estimated_minutes", "actual_minutes", "started_at", "reminder_at", "reminder_channels",
     "recurrence_rule", "external_url", "calendar_event_id", "progress_percent",
 ]);
-const COLUMN_NAME = /^[a-z_][a-z0-9_]*$/;
-const GROUPS = new Set(["status", "priority", "project", "category"]);
 const ASSIGNEE_TO_API = { user: "identity", role: "role", team: "team" } as const;
 const ASSIGNEE_FROM_API: Record<string, TaskAssignment["assignee_type"]> = { identity: "user", role: "role", team: "team" };
 
-function checkFilters(filters: TaskFilters): void {
+export function checkFilters(filters: TaskFilters): void {
     const unknown = Object.keys(filters).filter((key) => !FILTER_KEYS.has(key));
     if (unknown.length) throw new Error(`unknown task filters: ${unknown.sort().join(", ")}`);
 }
 
-function checkFields(fields: object, allowed: Set<string>): void {
+export function checkFields(fields: object, allowed: Set<string>): void {
     const unknown = Object.keys(fields).filter((key) => !allowed.has(key));
     if (unknown.length) throw new Error(`unknown task fields: ${unknown.sort().join(", ")}`);
 }
@@ -239,7 +227,7 @@ function dateOnly(value: unknown): string | null {
 }
 
 /** Backend-neutral task from a row that already has `number`, `parent_number`, `parent_recurring_number`. */
-function toRecord(row: Record<string, any>): TaskRecord {
+export function toRecord(row: Record<string, any>): TaskRecord {
     return {
         id: row.number, title: row.title, description: row.description ?? null,
         status: row.status, priority: row.priority, project: row.project ?? null,
@@ -270,7 +258,7 @@ const LEGACY_TASK_COLUMNS = [
 export const LEGACY_TASK_FIELDS: readonly string[] = LEGACY_TASK_COLUMNS;
 
 /**
- * The legacy `SELECT * FROM tasks` row shape for callers that must keep their
+ * The legacy task row shape (every column of the retired table) for callers that must keep their
  * HTTP/MCP response unchanged. Exact on the SQLite backend (the stored row);
  * derived from the contract fields on the API backend (SQLite-only bookkeeping
  * columns become null).
@@ -292,7 +280,7 @@ export function legacyTaskRow(task: TaskRecord): Record<string, any> {
     return row;
 }
 
-/** The legacy `SELECT * FROM task_types` row shape (exact on SQLite). */
+/** The legacy legacy task-type row shape (exact on SQLite). */
 export function legacyTaskTypeRow(type: TaskTypeRecord): Record<string, any> {
     const raw = type[RAW];
     if (raw) return { ...raw };
@@ -328,7 +316,7 @@ export function utcDate(offsetDays = 0, now: Date = new Date()): string {
 // ─── Serialization ────────────────────────────────────────────
 
 /** Promise-chain mutex. Stores are created per request, so the lock is keyed by the shared resource. */
-class AsyncMutex {
+export class AsyncMutex {
     private tail: Promise<unknown> = Promise.resolve();
 
     run<T>(fn: () => Promise<T>): Promise<T> {
@@ -338,197 +326,12 @@ class AsyncMutex {
     }
 }
 
-const dbLocks = new WeakMap<object, AsyncMutex>();
 const apiLocks = new Map<string, AsyncMutex>();
 
-function lockFor<K>(map: { get(k: K): AsyncMutex | undefined; set(k: K, v: AsyncMutex): unknown }, key: K): AsyncMutex {
+export function lockFor<K>(map: { get(k: K): AsyncMutex | undefined; set(k: K, v: AsyncMutex): unknown }, key: K): AsyncMutex {
     let lock = map.get(key);
     if (!lock) { lock = new AsyncMutex(); map.set(key, lock); }
     return lock;
-}
-
-// ─── SQLite backend ───────────────────────────────────────────
-
-export class SqliteTaskStore implements TaskStore {
-    constructor(private readonly db: SqliteLike) {}
-
-    exclusive<T>(fn: () => Promise<T>): Promise<T> {
-        return lockFor(dbLocks, this.db as object).run(fn);
-    }
-
-    private where(filters: TaskFilters): { sql: string; params: any[] } {
-        checkFilters(filters);
-        const f = filters;
-        const clauses = ["1 = 1"];
-        const params: any[] = [];
-        const add = (clause: string, ...values: any[]) => { clauses.push(clause); params.push(...values); };
-        if (!f.include_archived) add("archived_at IS NULL");
-        if (f.status?.length) add(`status IN (${f.status.map(() => "?").join(", ")})`, ...f.status);
-        if (f.external_source) add("external_source = ?", f.external_source);
-        if (f.no_external_source) add("external_source IS NULL");
-        if (f.project !== undefined && f.project !== null) add("project = ?", f.project);
-        if (f.category !== undefined && f.category !== null) add("category = ?", f.category);
-        if (f.priority_max !== undefined && f.priority_max !== null) add("priority <= ?", f.priority_max);
-        if (f.due_from) add("due_date IS NOT NULL AND substr(due_date, 1, 10) >= ?", f.due_from);
-        if (f.due_before) add("due_date IS NOT NULL AND substr(due_date, 1, 10) < ?", f.due_before);
-        if (f.completed_between) {
-            add("completed_at IS NOT NULL AND date(completed_at, 'localtime') BETWEEN ? AND ?", ...f.completed_between);
-        }
-        if (f.created_between) add("date(created_at, 'localtime') BETWEEN ? AND ?", ...f.created_between);
-        if (f.reminder_due_before) {
-            add("reminder_at IS NOT NULL AND datetime(reminder_at) <= datetime(?) AND reminder_sent = 0", f.reminder_due_before);
-        }
-        if (f.missing_calendar_event) add("calendar_event_id IS NULL");
-        if (f.numbers !== undefined && f.numbers !== null) {
-            add(`id IN (${f.numbers.map(() => "?").join(", ") || "NULL"})`, ...f.numbers);
-        }
-        if (f.parent !== undefined && f.parent !== null) add("parent_task_id = ?", f.parent);
-        if (f.q) {
-            const needle = "%" + f.q.toLowerCase().replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_") + "%";
-            add("(lower(title) LIKE ? ESCAPE '\\' OR lower(coalesce(description, '')) LIKE ? ESCAPE '\\')", needle, needle);
-        }
-        return { sql: clauses.join(" AND "), params };
-    }
-
-    private static record(row: Record<string, any>): TaskRecord {
-        const record = toRecord({ ...row, number: row.id, parent_number: row.parent_task_id, parent_recurring_number: row.parent_recurring_id });
-        record[RAW] = { ...row };
-        return record;
-    }
-
-    async list(filters: TaskFilters = {}): Promise<TaskRecord[]> {
-        const { sql, params } = this.where(filters);
-        const rows = this.db.prepare(`SELECT * FROM tasks WHERE ${sql} ORDER BY id`).all(...params);
-        return rows.map((row) => SqliteTaskStore.record(row));
-    }
-
-    async get(number: number): Promise<TaskRecord | null> {
-        const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(number);
-        return row ? SqliteTaskStore.record(row) : null;
-    }
-
-    private static values(fields: TaskCreateFields, legacy?: TaskLegacy): Record<string, any> {
-        const values: Record<string, any> = {};
-        for (const [key, value] of Object.entries(fields)) {
-            if (value === undefined) continue;
-            values[key] = key === "tags" && Array.isArray(value) ? JSON.stringify(value) : value;
-        }
-        for (const [key, value] of Object.entries(legacy ?? {})) {
-            if (!COLUMN_NAME.test(key)) throw new Error(`invalid legacy column ${JSON.stringify(key)}`);
-            values[key] = value;
-        }
-        return values;
-    }
-
-    /** `legacy` may carry SQLite-only columns, including explicit created_at/updated_at (else the column defaults apply). */
-    async create(fields: TaskCreateFields, { legacy }: { legacy?: TaskLegacy } = {}): Promise<number> {
-        checkFields(fields, new Set([...FIELD_KEYS, "parent_task_id"]));
-        const values = { status: "todo", ...SqliteTaskStore.values(fields, legacy) };
-        const columns = Object.keys(values);
-        const result = this.db.prepare(
-            `INSERT INTO tasks (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
-        ).run(...Object.values(values));
-        return Number(result.lastInsertRowid);
-    }
-
-    async update(number: number, fields: TaskFields, { legacy }: { legacy?: TaskLegacy } = {}): Promise<void> {
-        checkFields(fields, FIELD_KEYS);
-        const values = SqliteTaskStore.values(fields, legacy);
-        if (values.status === "done") {
-            const { status: _status, ...rest } = values;
-            await this.complete(number, { legacy: Object.keys(rest).length ? rest : undefined });
-            return;
-        }
-        const columns = Object.keys(values);
-        if (!columns.length) return;
-        const stamp = "updated_at" in values ? "" : ", updated_at = datetime('now')";
-        this.db.prepare(`UPDATE tasks SET ${columns.map((column) => `${column} = ?`).join(", ")}${stamp} WHERE id = ?`)
-            .run(...Object.values(values), number);
-    }
-
-    async complete(number: number, { legacy }: { legacy?: TaskLegacy } = {}): Promise<void> {
-        const extra = SqliteTaskStore.values({}, legacy);
-        const hasCompleted = "completed_at" in extra;
-        const completedParams = hasCompleted ? [extra.completed_at] : [];
-        delete extra.completed_at;
-        const stamp = "updated_at" in extra ? "" : ", updated_at = datetime('now')";
-        const assignments = Object.keys(extra).map((column) => `, ${column} = ?`).join("");
-        this.db.prepare(
-            `UPDATE tasks SET status = 'done', completed_at = ${hasCompleted ? "?" : "COALESCE(completed_at, datetime('now'))"}${stamp}${assignments} WHERE id = ?`,
-        ).run(...completedParams, ...Object.values(extra), number);
-    }
-
-    async archive(number: number, reason: string): Promise<void> {
-        this.db.prepare(
-            "UPDATE tasks SET archived_at = COALESCE(archived_at, datetime('now')), archive_reason = ?, updated_at = datetime('now') WHERE id = ?",
-        ).run(reason, number);
-    }
-
-    async unarchive(number: number): Promise<void> {
-        this.db.prepare("UPDATE tasks SET archived_at = NULL, archive_reason = NULL, updated_at = datetime('now') WHERE id = ?").run(number);
-    }
-
-    async roleSuggestions(filters: RoleSuggestionFilters = {}): Promise<RoleSuggestion[]> {
-        const clauses = ["1 = 1"];
-        const params: any[] = [];
-        for (const [column, value] of [
-            ["task_id", filters.task], ["role_id", filters.role_id], ["source_registry", filters.source_registry],
-            ["review_status", filters.review_status], ["confidence", filters.confidence],
-        ] as const) {
-            if (value !== undefined && value !== null) { clauses.push(`${column} = ?`); params.push(value); }
-        }
-        const rows = this.db.prepare(
-            "SELECT task_id, role_id, confidence, match_reason, review_status, source_registry, updated_at"
-            + ` FROM task_role_suggestions WHERE ${clauses.join(" AND ")} ORDER BY task_id, role_id, id`,
-        ).all(...params);
-        return rows.map((row) => ({
-            task: row.task_id, role_id: row.role_id, confidence: row.confidence ?? null, match_reason: row.match_reason ?? null,
-            review_status: row.review_status, source_registry: row.source_registry ?? null, updated_at: row.updated_at ?? null,
-        }));
-    }
-
-    async stats(groupBy: GroupBy | null = null, filters: TaskFilters = {}): Promise<TaskStats> {
-        const { sql, params } = this.where(filters);
-        const total = Number((this.db.prepare(`SELECT count(*) AS c FROM tasks WHERE ${sql}`).get(...params) as any).c);
-        if (!groupBy) return { total, groups: [] };
-        if (!GROUPS.has(groupBy)) throw new Error(`cannot group by ${JSON.stringify(groupBy)}`);
-        const rows = this.db.prepare(`SELECT ${groupBy} AS k, count(*) AS c FROM tasks WHERE ${sql} GROUP BY ${groupBy} ORDER BY ${groupBy}`).all(...params);
-        return {
-            total,
-            groups: rows.map((row) => ({ key: row.k === null || row.k === undefined ? null : String(row.k), count: Number(row.c) })),
-        };
-    }
-
-    async assignments(filters: AssignmentFilters = {}): Promise<TaskAssignment[]> {
-        const clauses = ["1 = 1"];
-        const params: any[] = [];
-        for (const [column, value] of [
-            ["task_id", filters.task], ["assignee_type", filters.assignee_type],
-            ["assignee_id", filters.assignee_id], ["assignment_type", filters.assignment_type],
-        ] as const) {
-            if (value !== undefined && value !== null) { clauses.push(`${column} = ?`); params.push(value); }
-        }
-        const rows = this.db.prepare(
-            "SELECT task_id, assignee_type, assignee_id, assignee_name, assignment_type FROM task_assignments"
-            + ` WHERE ${clauses.join(" AND ")} ORDER BY task_id, id`,
-        ).all(...params);
-        return rows.map((row) => ({
-            task: row.task_id, assignee_type: row.assignee_type || "user", assignee_id: row.assignee_id,
-            assignee_name: row.assignee_name ?? null, assignment_type: row.assignment_type || "assigned",
-        }));
-    }
-
-    async taskTypes({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<TaskTypeRecord[]> {
-        const rows = this.db.prepare(
-            "SELECT * FROM task_types WHERE (? OR is_active = 1) ORDER BY sort_order, name",
-        ).all(includeInactive ? 1 : 0);
-        return rows.map((row) => ({
-            id: row.id, name: row.name, description: row.description ?? null, icon: row.icon ?? null,
-            color: row.color ?? null, default_status: row.default_status || "todo",
-            allowed_statuses: tagsList(row.allowed_statuses),
-            is_active: Boolean(row.is_active ?? 1), sort_order: row.sort_order || 0, [RAW]: { ...row },
-        }));
-    }
 }
 
 // ─── API backend ──────────────────────────────────────────────
@@ -780,14 +583,16 @@ export function validateApiUrl(url: string): string {
 
 // ─── Client config file ───────────────────────────────────────
 
-const DEFAULT_TASKS_API = "http://127.0.0.1:3601";
 const CLIENT_KEYS = ["SOLO_EMPIRE_TASKS_BACKEND", "EMPIRE_TASKS_API"];
 
+export const SQLITE_RETIRED =
+    "the SQLite task backend was retired on 2026-10-09; tasks live in the Tasks API";
+
 export interface ClientSettings {
-    backend: string;
+    backend: "api";
     apiUrl: string;
-    backendSource: "env" | "file" | "default";
-    apiUrlSource: "env" | "file" | "default";
+    backendSource: "env" | "file";
+    apiUrlSource: "env" | "file";
     path: string;
 }
 
@@ -820,46 +625,47 @@ function readClientFile(path: string): Record<string, string> {
     return values;
 }
 
-/** Effective backend and API URL: non-empty env, else the client file, else the default. Never a token. */
+/**
+ * Effective backend and API URL: non-empty env, else the client file. Never a token.
+ * Nothing configured, a "sqlite" backend, or an api backend without a URL is an error.
+ */
 export function clientSettings(env: NodeJS.ProcessEnv = process.env): ClientSettings {
     const path = clientConfigPath(env);
     const file = readClientFile(path);
-    const pick = (key: string): [string, "env" | "file" | "default"] => {
+    const pick = (key: string): [string, "env" | "file" | null] => {
         if ((env[key] || "").trim()) return [(env[key] as string).trim(), "env"];
         if (file[key]) return [file[key], "file"];
-        return ["", "default"];
+        return ["", null];
     };
-    const [rawBackend, backendSource] = pick("SOLO_EMPIRE_TASKS_BACKEND");
-    const [rawUrl, apiUrlSource] = pick("EMPIRE_TASKS_API");
-    const backend = rawBackend || "sqlite";
-    let apiUrl = rawUrl;
-    if (backend === "api") {
-        if (backendSource === "file" && apiUrlSource === "default") {
-            throw new Error(`client config ${path} selects the api backend but sets no EMPIRE_TASKS_API`);
-        }
-        apiUrl = apiUrl || DEFAULT_TASKS_API;
-        validateApiUrl(apiUrl);
-    } else {
-        apiUrl = apiUrl || DEFAULT_TASKS_API;
+    const [backend, backendSource] = pick("SOLO_EMPIRE_TASKS_BACKEND");
+    const [apiUrl, apiUrlSource] = pick("EMPIRE_TASKS_API");
+    if (backend === "sqlite") throw new Error(SQLITE_RETIRED);
+    if (!backend || !backendSource) {
+        throw new Error(
+            `no task backend configured: set SOLO_EMPIRE_TASKS_BACKEND=api and EMPIRE_TASKS_API in ${path} or the environment`,
+        );
     }
-    return { backend, apiUrl, backendSource, apiUrlSource, path };
+    if (backend !== "api") throw new Error(`unknown SOLO_EMPIRE_TASKS_BACKEND ${JSON.stringify(backend)}`);
+    if (!apiUrl || !apiUrlSource) {
+        throw new Error(`the api backend needs EMPIRE_TASKS_API: set it in ${path} or the environment (sets no EMPIRE_TASKS_API)`);
+    }
+    validateApiUrl(apiUrl);
+    return { backend: "api", apiUrl, backendSource, apiUrlSource, path };
 }
 
+/** Test seam: replaces the store openTaskStore returns (in-process only; no env or file selects it). */
+let storeOverride: ((automation: string) => TaskStore) | null = null;
+export function overrideTaskStoreForTests(factory: ((automation: string) => TaskStore) | null): void {
+    storeOverride = factory;
+}
+
+/** Always the Tasks API store. */
 export function openTaskStore(
-    db: SqliteLike | null,
     automation: string = AUTOMATION_ID,
     opts: { channel?: string; env?: NodeJS.ProcessEnv; fetch?: FetchLike } = {},
 ): TaskStore {
+    if (storeOverride) return storeOverride(automation);
     const env = opts.env ?? process.env;
-    const { backend, apiUrl } = clientSettings(env);
-    if (backend === "sqlite") {
-        if (!db) throw new Error("the sqlite backend needs a connection");
-        return new SqliteTaskStore(db);
-    }
-    if (backend === "api") {
-        return new ApiTaskStore(apiUrl, automationToken(automation, env), {
-            channel: opts.channel, fetch: opts.fetch,
-        });
-    }
-    throw new Error(`unknown SOLO_EMPIRE_TASKS_BACKEND ${JSON.stringify(backend)}`);
+    const { apiUrl } = clientSettings(env);
+    return new ApiTaskStore(apiUrl, automationToken(automation, env), { channel: opts.channel, fetch: opts.fetch });
 }

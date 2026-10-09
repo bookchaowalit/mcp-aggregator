@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ToolContext } from "../tool-context.js";
 import { sqliteNow, taskStatusSchema, updateTask } from "../task-state.js";
-import { clientSettings, compareValues, legacyTaskRow, openTaskStore, type TaskRecord, type TaskStore } from "../task-store.js";
+import { compareValues, legacyTaskRow, openTaskStore, type TaskRecord, type TaskStore } from "../task-store.js";
 
 const AUTOMATION = "legacy-mcp";
 const CHANNEL = "mcp";
@@ -19,13 +19,10 @@ function groupCount(rows: Row[], key: string): Row[] {
 
 export function registerTasksTools({
     server,
-    getDb,
 }: Pick<ToolContext, "server" | "getDb">): void {
 
-    /** The SQLite connection is only needed (and opened) on the sqlite backend. */
     async function openStore(): Promise<TaskStore> {
-        const sqlite = clientSettings().backend === "sqlite";
-        return openTaskStore(sqlite ? await getDb() : null, AUTOMATION, { channel: CHANNEL });
+        return openTaskStore(AUTOMATION, { channel: CHANNEL });
     }
 
     server.tool(

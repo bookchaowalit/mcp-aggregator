@@ -11,14 +11,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerTasksTools } from "../src/tools/tasks.js";
 import { buildTaskUpdate } from "../src/task-state.js";
+import { overrideTaskStoreForTests } from "../src/task-store.js";
+import { SqliteTaskStore, TASKS_DDL, TASK_ROLE_SUGGESTIONS_DDL } from "./support/sqlite-task-store.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const directory = mkdtempSync(join(tmpdir(), "solo-task-lifecycle-"));
 const dbPath = join(directory, "tasks.db");
 const db = new Database(dbPath);
-const schema = readFileSync(join(root, "infra", "database", "schema.sql"), "utf8");
-db.exec(schema.slice(schema.indexOf("CREATE TABLE tasks (")).split(";", 1)[0]);
-db.exec(schema.slice(schema.indexOf("CREATE TABLE task_role_suggestions (")).split(";", 1)[0]);
+db.exec(TASKS_DDL);
+db.exec(TASK_ROLE_SUGGESTIONS_DDL);
+overrideTaskStoreForTests(() => new SqliteTaskStore(db));
 mkdirSync(join(directory, "infra", "go", "task-sync"), { recursive: true });
 const server = new McpServer({ name: "task-fixture", version: "1.0.0" });
 const client = new Client({ name: "task-fixture-client", version: "1.0.0" });
@@ -33,6 +35,7 @@ before(async () => {
 after(async () => {
     await client.close();
     await server.close();
+    overrideTaskStoreForTests(null);
     db.close();
     rmSync(directory, { recursive: true, force: true });
 });
@@ -48,7 +51,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
 function runCli(...args: string[]) {
     const result = spawnSync(
         process.execPath,
-        [join(root, "infra", "node_modules", "tsx", "dist", "cli.mjs"), join(root, "infra", "cli.ts"), "tasks", ...args],
+        [join(root, "infra", "node_modules", "tsx", "dist", "cli.mjs"), join(root, "infra", "mcp-server", "tests", "support", "run-cli-with-sqlite-tasks.ts"), "tasks", ...args],
         {
             cwd: root,
             env: { ...process.env, SOLO_EMPIRE_DB_PATH: dbPath, SOLO_EMPIRE_ROOT: directory, PATH: directory },
@@ -122,16 +125,20 @@ test("sync, push, and pull return nonzero when their Go runtime is unavailable",
     }
 });
 
-test("task entrypoint works on Windows and Unix with isolated state", () => {
+test("task entrypoint refuses to run without the Tasks API switch (no SQLite fallback)", () => {
     const taskResult = spawnSync("task", ["tasks", "--", "--project", "__fixture_no_match__"], {
         cwd: root,
-        env: { ...process.env, SOLO_EMPIRE_DB_PATH: dbPath, SOLO_EMPIRE_ROOT: directory },
+        env: {
+            ...process.env, SOLO_EMPIRE_DB_PATH: dbPath, SOLO_EMPIRE_ROOT: directory,
+            EMPIRE_CLIENT_CONFIG: join(directory, "absent-client.env"),
+            SOLO_EMPIRE_TASKS_BACKEND: "", EMPIRE_TASKS_API: "",
+        },
         encoding: "utf8",
         timeout: 15000,
     });
     assert.ifError(taskResult.error);
-    assert.equal(taskResult.status, 0, taskResult.stderr);
-    assert.match(taskResult.stdout, /No tasks/);
+    assert.notEqual(taskResult.status, 0);
+    assert.match(taskResult.stderr + taskResult.stdout, /no task backend configured/);
 });
 
 test("missing MCP tasks and empty updates are explicit tool errors", async () => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,19 +15,20 @@ import {
     legacyTaskRow,
     legacyTaskTypeRow,
     openTaskStore,
+    overrideTaskStoreForTests,
     sqlLike,
     type FetchLike,
 } from "../src/task-store.js";
+import { SqliteTaskStore, TASKS_DDL } from "./support/sqlite-task-store.js";
 import { planTaskUpdate, updateTask } from "../src/task-state.js";
 import { registerCustomizationTools } from "../src/tools/customization.js";
 import { registerPerformanceTools } from "../src/tools/performance.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const schema = readFileSync(join(root, "infra", "database", "schema.sql"), "utf8");
 
 function fixture() {
     const db = new Database(":memory:");
-    db.exec(schema.slice(schema.indexOf("CREATE TABLE tasks (")).split(";", 1)[0]);
+    db.exec(TASKS_DDL);
     db.exec(`CREATE TABLE task_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
         assignee_type TEXT DEFAULT 'user', assignee_id TEXT NOT NULL, assignee_name TEXT, assignment_type TEXT DEFAULT 'assigned')`);
     db.exec(`CREATE TABLE task_types (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT,
@@ -56,7 +57,7 @@ function fixture() {
 
 test("sqlite backend list matches the old SELECT * queries", async () => {
     const db = fixture();
-    const store = openTaskStore(db, "dashboard-api", { env: {} });
+    const store = new SqliteTaskStore(db);
     const rows = (await store.list()).map(legacyTaskRow);
     assert.deepEqual(rows, db.prepare("SELECT * FROM tasks WHERE archived_at IS NULL ORDER BY id").all());
     assert.deepEqual((await store.list({ include_archived: true })).map((t) => t.id), [1, 2, 3, 4, 5]);
@@ -71,7 +72,7 @@ test("sqlite backend list matches the old SELECT * queries", async () => {
 
 test("sqlite backend stats matches the old GROUP BY queries", async () => {
     const db = fixture();
-    const store = openTaskStore(db, "dashboard-api", { env: {} });
+    const store = new SqliteTaskStore(db);
     const old = (column: string, where: string) =>
         (db.prepare(`SELECT ${column} AS k, COUNT(*) AS c FROM tasks ${where} GROUP BY ${column} ORDER BY ${column}`).all() as any[])
             .map((r) => ({ key: r.k === null ? null : String(r.k), count: r.c }));
@@ -85,7 +86,7 @@ test("sqlite backend stats matches the old GROUP BY queries", async () => {
 
 test("sqlite backend assignments and task types match the old queries", async () => {
     const db = fixture();
-    const store = openTaskStore(db, "dashboard-api", { env: {} });
+    const store = new SqliteTaskStore(db);
     assert.deepEqual(await store.assignments({ assignee_type: "role", assignee_id: "r1" }), [
         { task: 1, assignee_type: "role", assignee_id: "r1", assignee_name: "Role One", assignment_type: "assigned" },
     ]);
@@ -129,7 +130,7 @@ const apiTask = (number: number, extra: Record<string, unknown> = {}) => ({
 test("api backend builds list requests with auth, filters and cursor pagination", async () => {
     const first = Array.from({ length: 200 }, (_, i) => apiTask(i + 1));
     const { calls, fetch } = mockFetch([{ items: first }, { items: [apiTask(201, { parent_number: 7 })] }]);
-    const store = openTaskStore(null, "dashboard-api", {
+    const store = openTaskStore("dashboard-api", {
         channel: "dashboard", fetch,
         env: { SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "https://tasks.test:3601/", EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API: "tok" },
     });
@@ -193,16 +194,18 @@ test("api backend maps errors and refuses to guess a missing token", async () =>
     const failing: FetchLike = async () => ({ ok: false, status: 403, json: async () => ({ detail: { reason: "forbidden" } }) });
     await assert.rejects(new ApiTaskStore("http://x", "t", { fetch: failing }).list(), /403: forbidden/);
     assert.throws(
-        () => openTaskStore(null, "no-such-automation", { env: { SOLO_EMPIRE_TASKS_BACKEND: "api" } }),
+        () => openTaskStore("no-such-automation", { env: { SOLO_EMPIRE_TASKS_BACKEND: "api" } }),
         /no token for automation/,
     );
-    assert.throws(() => openTaskStore(null, "x", { env: { SOLO_EMPIRE_TASKS_BACKEND: "nope" } }), /unknown SOLO_EMPIRE_TASKS_BACKEND/);
-    assert.throws(() => openTaskStore(null, "x", { env: {} }), /needs a connection/);
+    assert.throws(() => openTaskStore("x", { env: { SOLO_EMPIRE_TASKS_BACKEND: "nope" } }), /unknown SOLO_EMPIRE_TASKS_BACKEND/);
+    assert.throws(() => openTaskStore("x", { env: { SOLO_EMPIRE_TASKS_BACKEND: "sqlite" } }), /retired on 2026-10-09/);
+    assert.throws(() => openTaskStore("x", { env: { EMPIRE_CLIENT_CONFIG: "/nonexistent/client.env" } }), /no task backend configured/);
 });
 
 async function mcp(db: Database.Database) {
     const server = new McpServer({ name: "fixture", version: "1.0.0" });
     const client = new Client({ name: "fixture-client", version: "1.0.0" });
+    overrideTaskStoreForTests(() => new SqliteTaskStore(db)); // callers reset it with overrideTaskStoreForTests(null)
     const context: any = { server, getDb: () => db };
     registerCustomizationTools(context);
     registerPerformanceTools(context);
@@ -224,6 +227,7 @@ test("MCP run_custom_view, list_task_types and db_stats keep their old output", 
     view.run("v3", JSON.stringify({}), JSON.stringify({ field: "due_date" }));
     view.run("v4", JSON.stringify({}), JSON.stringify({ field: "nope" }));
     const call = await mcp(db);
+    after(() => overrideTaskStoreForTests(null));
 
     const oldView = (sql: string, ...params: any[]) => db.prepare(sql).all(...params);
     assert.deepEqual((await call("run_custom_view", { view_id: 1 })).tasks, oldView(
@@ -248,7 +252,7 @@ test("MCP run_custom_view, list_task_types and db_stats keep their old output", 
 
 test("sqlite backend writes: get, create, update, complete, archive, unarchive", async () => {
     const db = fixture();
-    const store = openTaskStore(db, "owner-cli", { env: {} });
+    const store = new SqliteTaskStore(db);
     assert.equal((await store.get(999)), null);
     assert.equal((await store.get(5))?.archived_at, "2026-09-10 00:00:00"); // archived tasks are readable
     const number = await store.create({ title: "New", priority: 2, tags: ["x", "y"], parent_task_id: 1 }, { legacy: { sync_status: "local" } });
@@ -304,7 +308,7 @@ test("planTaskUpdate and updateTask keep the old buildTaskUpdate rules", async (
     assert.equal(planTaskUpdate({ append_notes: "b" }, { status: "todo", notes: "" })?.fields.notes, "b");
 
     const db = fixture();
-    const store = openTaskStore(db, "legacy-mcp", { env: {} });
+    const store = new SqliteTaskStore(db);
     assert.equal(await updateTask(store, 999, { title: "x" }), "missing");
     assert.equal(await updateTask(store, 1, {}), "empty");
     assert.equal(await updateTask(store, 1, { status: "done", progress_percent: 5, title: "Done now" }), "updated");
@@ -340,7 +344,7 @@ test("api backend writes: create, update, complete, archive, unarchive, get", as
         { status: 404, body: { detail: { reason: "not_found" } } },
         { body: apiTask(9, { archived_at: "2026-01-01T00:00:00Z" }) },
     ]);
-    const store = openTaskStore(null, "owner-cli", {
+    const store = openTaskStore("owner-cli", {
         channel: "cli", fetch,
         env: { SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "https://t:1", EMPIRE_AUTOMATION_TOKEN_OWNER_CLI: "tok" },
     });
@@ -404,7 +408,7 @@ test("sqlite roleSuggestions matches the old query order", async () => {
         confidence TEXT, match_reason TEXT, review_status TEXT DEFAULT 'suggested', source_registry TEXT, updated_at TEXT)`);
     const insert = db.prepare("INSERT INTO task_role_suggestions (task_id, role_id, confidence, match_reason, review_status, source_registry) VALUES (?, ?, 'high', 'm', ?, 's')");
     insert.run(2, "b", "suggested"); insert.run(1, "z", "suggested"); insert.run(1, "a", "accepted"); insert.run(1, "c", "suggested");
-    const store = openTaskStore(db, "owner-cli", { env: {} });
+    const store = new SqliteTaskStore(db);
     assert.deepEqual((await store.roleSuggestions({ review_status: "suggested" })).map((s) => [s.task, s.role_id]), [[1, "c"], [1, "z"], [2, "b"]]);
     assert.equal((await store.roleSuggestions()).length, 4);
 });
@@ -421,25 +425,25 @@ function clientFile(content: string | null, mode = 0o600) {
     return { path, env: { EMPIRE_CLIENT_CONFIG: path } as NodeJS.ProcessEnv };
 }
 
-test("client config: a missing file means sqlite", () => {
-    const { env } = clientFile(null);
-    const settings = clientSettings(env);
-    assert.equal(settings.backend, "sqlite");
-    assert.equal(settings.apiUrl, "http://127.0.0.1:3601");
+test("client config: a missing file and no env is an error, sqlite is retired", () => {
+    assert.throws(() => clientSettings(clientFile(null).env), /no task backend configured/);
+    assert.throws(() => clientSettings({ ...clientFile(null).env, SOLO_EMPIRE_TASKS_BACKEND: "sqlite" }), /the SQLite task backend was retired on 2026-10-09; tasks live in the Tasks API/);
+    assert.throws(() => clientSettings(clientFile("SOLO_EMPIRE_TASKS_BACKEND=sqlite\n").env), /retired/);
 });
 
 test("client config: the file selects api and ignores other keys", () => {
     const { env } = clientFile('# note\n\nSOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API="https://tasks.example.com"\nOTHER=x\n');
     const settings = clientSettings(env);
     assert.deepEqual([settings.backend, settings.apiUrl, settings.backendSource], ["api", "https://tasks.example.com", "file"]);
-    const store = openTaskStore(null, "dashboard-api", { env: { ...env, EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API: "t" } });
+    const store = openTaskStore("dashboard-api", { env: { ...env, EMPIRE_AUTOMATION_TOKEN_DASHBOARD_API: "t" } });
     assert.ok(store instanceof ApiTaskStore);
 });
 
 test("client config: a non-empty env var beats the file, an empty one does not", () => {
     const { env } = clientFile("SOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API=https://a.example.com\n");
-    const winner = clientSettings({ ...env, SOLO_EMPIRE_TASKS_BACKEND: "sqlite", EMPIRE_TASKS_API: "http://b.test" });
-    assert.deepEqual([winner.backend, winner.apiUrl], ["sqlite", "http://b.test"]);
+    const winner = clientSettings({ ...env, SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "http://127.0.0.1:1" });
+    assert.deepEqual([winner.backend, winner.apiUrl, winner.apiUrlSource], ["api", "http://127.0.0.1:1", "env"]);
+    assert.throws(() => clientSettings({ ...env, SOLO_EMPIRE_TASKS_BACKEND: "sqlite" }), /retired/);
     assert.equal(clientSettings({ ...env, SOLO_EMPIRE_TASKS_BACKEND: "" }).backend, "api");
 });
 
@@ -447,7 +451,7 @@ test("client config: group/world accessible files are refused", () => {
     for (const mode of [0o640, 0o604, 0o620, 0o666]) {
         const { env } = clientFile("SOLO_EMPIRE_TASKS_BACKEND=api\nEMPIRE_TASKS_API=https://a.example.com\n", mode);
         assert.throws(() => clientSettings(env), /refusing client config/);
-        assert.throws(() => openTaskStore(null, "dashboard-api", { env }), /refusing client config/);
+        assert.throws(() => openTaskStore("dashboard-api", { env }), /refusing client config/);
     }
 });
 

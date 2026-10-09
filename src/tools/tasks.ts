@@ -14,6 +14,7 @@ export function registerTasksTools({
             status: taskStatusSchema.optional(),
             project: z.string().optional(),
             priority: z.number().min(1).max(5).optional(),
+            parent_task_id: z.number().int().optional().describe("Only subtasks of this task"),
             limit: z.number().min(1).max(100).default(50),
         },
         async (params) => {
@@ -24,6 +25,7 @@ export function registerTasksTools({
             if (params.status) { sql += " AND status = ?"; values.push(params.status); }
             if (params.project) { sql += " AND project = ?"; values.push(params.project); }
             if (params.priority) { sql += " AND priority = ?"; values.push(params.priority); }
+            if (params.parent_task_id !== undefined) { sql += " AND parent_task_id = ?"; values.push(params.parent_task_id); }
             sql += " ORDER BY priority ASC, created_at DESC LIMIT ?";
             values.push(params.limit);
 
@@ -46,17 +48,39 @@ export function registerTasksTools({
             category: z.string().optional().describe("income, ops, learning, health, creative, admin"),
             due_date: z.string().optional().describe("Due date YYYY-MM-DD"),
             tags: z.string().optional().describe("Comma-separated tags"),
+            parent_task_id: z.number().int().optional().describe("Parent task ID; makes this a subtask"),
+            reuse_open: z.boolean().default(false).describe("Return an existing open task with the same title, project, and parent instead of creating a duplicate"),
         },
         async (params) => {
             const db = await getDb();
+            const parentId = params.parent_task_id ?? null;
+            if (parentId !== null) {
+                const parent = db.prepare(`SELECT id FROM tasks WHERE id = ? AND ${unarchivedTasksWhere}`).get(parentId);
+                if (!parent) {
+                    return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: `Parent task ${parentId} not found` }) }] };
+                }
+            }
+            if (params.reuse_open) {
+                const existing = db.prepare(`
+                    SELECT * FROM tasks
+                    WHERE ${unarchivedTasksWhere} AND status NOT IN ('done', 'cancelled')
+                      AND title = ? AND project IS ? AND parent_task_id IS ?
+                    ORDER BY id LIMIT 1
+                `).get(params.title, params.project || null, parentId);
+                if (existing) {
+                    return {
+                        content: [{ type: "text", text: JSON.stringify({ success: true, reused: true, task: existing, message: "Existing open task reused." }, null, 2) }],
+                    };
+                }
+            }
             const tagsJson = params.tags ? JSON.stringify(params.tags.split(",").map(t => t.trim())) : null;
             const result = db.prepare(`
-                INSERT INTO tasks (title, description, status, priority, project, category, due_date, tags, progress_percent, completed_at, sync_status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'done' THEN datetime('now') END, 'local', datetime('now'), datetime('now'))
+                INSERT INTO tasks (title, description, status, priority, project, category, due_date, tags, progress_percent, completed_at, sync_status, created_at, updated_at, parent_task_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'done' THEN datetime('now') END, 'local', datetime('now'), datetime('now'), ?)
             `).run(
                 params.title, params.description || null, params.status, params.priority,
                 params.project || null, params.category || null, params.due_date || null, tagsJson,
-                params.status === "done" ? 100 : 0, params.status
+                params.status === "done" ? 100 : 0, params.status, parentId
             );
             const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid);
             return {
@@ -76,6 +100,7 @@ export function registerTasksTools({
             priority: z.number().min(1).max(5).optional(),
             project: z.string().optional(),
             due_date: z.string().optional(),
+            append_notes: z.string().optional().describe("Text appended as a new line to the task notes, e.g. commit SHAs, review findings, models, metrics"),
         },
         async (params) => {
             const db = await getDb();

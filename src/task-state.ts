@@ -12,6 +12,7 @@ export interface TaskUpdateFields {
     project?: string;
     due_date?: string;
     progress_percent?: number;
+    append_notes?: string;
 }
 
 export function buildTaskUpdate(fields: TaskUpdateFields, currentStatus: TaskStatus) {
@@ -26,6 +27,10 @@ export function buildTaskUpdate(fields: TaskUpdateFields, currentStatus: TaskSta
             assignments.push(`${key} = ?`);
             values.push(value);
         }
+    }
+    if (fields.append_notes !== undefined && fields.append_notes.trim() !== "") {
+        assignments.push("notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END");
+        values.push(fields.append_notes, fields.append_notes);
     }
     if (assignments.length === 0 && fields.progress_percent === undefined) {
         return { assignments, values };

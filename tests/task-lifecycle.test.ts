@@ -142,3 +142,29 @@ test("missing MCP tasks and empty updates are explicit tool errors", async () =>
     assert.equal((await callTool("update_task", { id: created.data.task.id })).error, true);
     assert.deepEqual(buildTaskUpdate({}, "done"), { assignments: [], values: [] });
 });
+
+test("subtasks link to a parent, reuse open duplicates on request, and append notes", async () => {
+    const parent = (await callTool("create_task", { title: "Parent fixture", project: "fixture" })).data.task;
+    assert.equal((await callTool("create_task", { title: "Orphan", parent_task_id: 999999 })).error, true);
+
+    const child = (await callTool("create_task", { title: "Child fixture", project: "fixture", parent_task_id: parent.id })).data;
+    assert.equal(child.task.parent_task_id, parent.id);
+    const retry = (await callTool("create_task", { title: "Child fixture", project: "fixture", parent_task_id: parent.id, reuse_open: true })).data;
+    assert.equal(retry.reused, true);
+    assert.equal(retry.task.id, child.task.id);
+    const duplicate = (await callTool("create_task", { title: "Child fixture", project: "fixture", parent_task_id: parent.id })).data;
+    assert.notEqual(duplicate.task.id, child.task.id);
+
+    await callTool("complete_task", { id: child.task.id });
+    await callTool("complete_task", { id: duplicate.task.id });
+    const afterDone = (await callTool("create_task", { title: "Child fixture", project: "fixture", parent_task_id: parent.id, reuse_open: true })).data;
+    assert.equal(afterDone.reused, undefined);
+
+    const listed = (await callTool("list_tasks", { parent_task_id: parent.id })).data;
+    assert.equal(listed.total, 3);
+
+    await callTool("update_task", { id: parent.id, append_notes: "sha=abc123" });
+    const noted = (await callTool("update_task", { id: parent.id, append_notes: "review=pass" })).data.task;
+    assert.equal(noted.notes, "sha=abc123\nreview=pass");
+    assert.equal((await callTool("update_task", { id: parent.id, append_notes: "  " })).error, true);
+});

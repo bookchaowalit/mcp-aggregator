@@ -168,3 +168,39 @@ test("subtasks link to a parent, reuse open duplicates on request, and append no
     assert.equal(noted.notes, "sha=abc123\nreview=pass");
     assert.equal((await callTool("update_task", { id: parent.id, append_notes: "  " })).error, true);
 });
+
+test("reuse_open never matches across parent, project, closed, or archived tasks", async () => {
+    const create = async (args: Record<string, unknown>) => (await callTool("create_task", args)).data;
+    const parentA = (await create({ title: "Reuse parent A" })).task;
+    const parentB = (await create({ title: "Reuse parent B" })).task;
+
+    const underA = (await create({ title: "Reuse child", project: "p1", parent_task_id: parentA.id })).task;
+    const underB = await create({ title: "Reuse child", project: "p1", parent_task_id: parentB.id, reuse_open: true });
+    assert.equal(underB.reused, undefined);
+    assert.notEqual(underB.task.id, underA.id);
+
+    const topLevel = await create({ title: "Reuse child", project: "p1", reuse_open: true });
+    assert.equal(topLevel.reused, undefined);
+    assert.notEqual(topLevel.task.id, underA.id);
+    const topLevelAgain = await create({ title: "Reuse child", project: "p1", reuse_open: true });
+    assert.equal(topLevelAgain.task.id, topLevel.task.id);
+
+    const solo = (await create({ title: "Reuse solo" })).task;
+    const soloUnderA = await create({ title: "Reuse solo", parent_task_id: parentA.id, reuse_open: true });
+    assert.equal(soloUnderA.reused, undefined);
+    assert.notEqual(soloUnderA.task.id, solo.id);
+
+    const otherProject = await create({ title: "Reuse child", project: "p2", parent_task_id: parentA.id, reuse_open: true });
+    assert.equal(otherProject.reused, undefined);
+    const noProject = await create({ title: "Reuse child", parent_task_id: parentA.id, reuse_open: true });
+    assert.equal(noProject.reused, undefined);
+
+    const cancelled = (await create({ title: "Reuse cancelled" })).task;
+    await callTool("update_task", { id: cancelled.id, status: "cancelled" });
+    assert.notEqual((await create({ title: "Reuse cancelled", reuse_open: true })).task.id, cancelled.id);
+
+    const archived = (await create({ title: "Reuse archived" })).task;
+    db.prepare("UPDATE tasks SET archived_at = datetime('now') WHERE id = ?").run(archived.id);
+    assert.notEqual((await create({ title: "Reuse archived", reuse_open: true })).task.id, archived.id);
+    assert.equal((await callTool("create_task", { title: "Under archived", parent_task_id: archived.id })).error, true);
+});

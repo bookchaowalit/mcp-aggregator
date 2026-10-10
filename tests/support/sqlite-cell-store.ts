@@ -10,6 +10,7 @@ import { CellStoreError, type CellRecord, type CellStore, type Filters } from ".
 import type { SqliteLike } from "./sqlite-task-store.js";
 
 const LEGACY_DDL = join(dirname(fileURLToPath(import.meta.url)), "../../../tests/support/legacy_portfolio_tables.sql");
+const LEGACY_DDL_2 = join(dirname(fileURLToPath(import.meta.url)), "../../../tests/support/legacy_operating_intake_automation_tables.sql");
 
 // plural -> [cell, legacy table, id column, order column, bool columns]
 const RESOURCES: Record<string, [string, string, string, string, string[]]> = {
@@ -39,6 +40,19 @@ const RESOURCES: Record<string, [string, string, string, string, string[]]> = {
     "role-path-steps": ["roles-skills", "role_path_steps", "id", "id", []],
     "role-project-allocations": ["roles-skills", "role_project_allocations", "id", "id", []],
     "role-skill-links": ["roles-skills", "role_skill_links", "id", "id", []],
+    "cycles": ["operating", "operating_cycles", "id", "start_date", []],
+    "cycle-tasks": ["operating", "operating_cycle_tasks", "id", "id", ["evidence_required"]],
+    "cycle-goal-links": ["operating", "operating_cycle_goal_links", "id", "id", []],
+    "cycle-reviews": ["operating", "operating_cycle_reviews", "id", "id", []],
+    "kpis": ["operating", "operating_kpi_definitions", "id", "id", []],
+    "kpi-measurements": ["operating", "operating_kpi_measurements", "id", "id", []],
+    "sources": ["intake", "source_registry", "id", "id", []],
+    "intakes": ["intake", "intake_queue", "id", "id", []],
+    "intake-events": ["intake", "intake_events", "id", "id", []],
+    "cron-jobs": ["automation", "cron_jobs", "id", "id", ["is_active"]],
+    "automation-rules": ["automation", "automation_rules", "id", "id", ["is_active"]],
+    "workflow-pipelines": ["automation", "workflow_pipelines", "id", "id", ["is_active"]],
+    "automation-log": ["automation", "automation_log", "id", "id", ["success"]],
 };
 
 export interface SqliteDb extends SqliteLike {
@@ -48,7 +62,7 @@ export interface SqliteDb extends SqliteLike {
 export class SqliteCellStore implements CellStore {
     constructor(private readonly db: SqliteDb, readonly cell: string) {
         // CREATE ... IF NOT EXISTS: a fixture's own (minimal) tables win, so an index on a column they lack is skipped.
-        for (const statement of readFileSync(LEGACY_DDL, "utf-8").split(/;[ \t]*\r?\n/)) {
+        for (const statement of [LEGACY_DDL, LEGACY_DDL_2].flatMap((file) => readFileSync(file, "utf-8").split(/;[ \t]*\r?\n/))) {
             if (!statement.replace(/--.*$/gm, "").trim()) continue;
             try {
                 db.exec(statement);

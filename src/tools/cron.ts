@@ -1,10 +1,18 @@
 import { z } from "zod";
 import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { openCellStore } from "../cell-store.js";
+
+function cronJobs() {
+    return openCellStore("automation", "legacy-mcp", { channel: "mcp" });
+}
+
+function unavailable(error: unknown) {
+    return { content: [{ type: "text" as const, text: JSON.stringify({ error: `automation API unavailable: ${(error as Error).message}` }) }] };
+}
 
 export function registerCronTools({
     server,
-    getDb,
     runPyScript,
     scriptsDir: SCRIPTS_DIR,
     repoRoot: REPO_ROOT,
@@ -21,16 +29,19 @@ export function registerCronTools({
             job_type: z.string().optional().describe("Filter by job type"),
         },
         async ({ status, job_type }) => {
-            const db = await getDb();
-            let sql = "SELECT * FROM cron_jobs WHERE 1=1";
-            const params: any[] = [];
-            if (status) { sql += " AND last_status = ?"; params.push(status); }
-            if (job_type) { sql += " AND job_type = ?"; params.push(job_type); }
-            sql += " ORDER BY last_run_at DESC";
-            const jobs = db.prepare(sql).all(...params);
-            const summary = db.prepare(`
-                SELECT last_status, COUNT(*) as count FROM cron_jobs GROUP BY last_status
-            `).all();
+            let all;
+            try {
+                all = await cronJobs().list("cron-jobs");
+            } catch (error) {
+                return unavailable(error);
+            }
+            const jobs = all
+                .filter((job) => (!status || job.last_status === status) && (!job_type || job.job_type === job_type))
+                .sort((x, y) => (x.last_run_at == null ? 1 : 0) - (y.last_run_at == null ? 1 : 0)
+                    || (Date.parse(String(y.last_run_at ?? "")) || 0) - (Date.parse(String(x.last_run_at ?? "")) || 0));
+            const counts = new Map<string | null, number>();
+            for (const job of all) counts.set(job.last_status ?? null, (counts.get(job.last_status ?? null) ?? 0) + 1);
+            const summary = [...counts].map(([last_status, count]) => ({ last_status, count }));
             return {
                 content: [{
                     type: "text",
@@ -48,8 +59,16 @@ export function registerCronTools({
             dry_run: z.boolean().optional().describe("If true, only show what would be done"),
         },
         async ({ job_type, dry_run }) => {
-            const db = await getDb();
-            const job = db.prepare("SELECT * FROM cron_jobs WHERE job_type = ? ORDER BY id LIMIT 1").get(job_type) as any;
+            const jobsCell = (() => { try { return cronJobs(); } catch (error) { return error; } })();
+            if (jobsCell instanceof Error) return unavailable(jobsCell);
+            const lookup = async () => (await (jobsCell as ReturnType<typeof cronJobs>).list("cron-jobs", { job_type }))
+                .sort((x, y) => x.id - y.id)[0] as any;
+            let job;
+            try {
+                job = await lookup();
+            } catch (error) {
+                return unavailable(error);
+            }
             if (!job) {
                 return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown job type: ${job_type}` }) }] };
             }
@@ -89,10 +108,8 @@ export function registerCronTools({
                     cwd: REPO_ROOT,
                     timeout: 900_000,
                     maxBuffer: 2 * 1024 * 1024,
-                }, (err: any, stdout: string, stderr: string) => {
-                    const state = db.prepare(
-                        "SELECT last_run_at, last_status FROM cron_jobs WHERE job_type = ? ORDER BY id LIMIT 1",
-                    ).get(job_type) as any;
+                }, async (err: any, stdout: string, stderr: string) => {
+                    const state = await lookup().catch(() => undefined);
 
                     if (err) {
                         fulfill({

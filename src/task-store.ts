@@ -584,7 +584,7 @@ export function validateApiUrl(url: string, name: string = "EMPIRE_TASKS_API"): 
 // ─── Client config file ───────────────────────────────────────
 
 const CLIENT_KEYS = ["SOLO_EMPIRE_TASKS_BACKEND", "EMPIRE_TASKS_API", "EMPIRE_HABITS_API", "EMPIRE_GOALS_API",
-    "EMPIRE_PROJECTS_API", "EMPIRE_ROLES_SKILLS_API"];
+    "EMPIRE_PROJECTS_API", "EMPIRE_ROLES_SKILLS_API", "EMPIRE_OPERATING_API", "EMPIRE_INTAKE_API", "EMPIRE_AUTOMATION_API"];
 
 export const SQLITE_RETIRED =
     "the SQLite task backend was retired on 2026-10-09; tasks live in the Tasks API";

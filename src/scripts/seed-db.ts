@@ -1,9 +1,13 @@
 import { getDb, initDb, closeDb } from "../db.js";
+import { openCellStore } from "../cell-store.js";
 
 console.log("Seeding database...");
 await initDb();
 const db = await getDb();
 const skillsOnly = process.argv.includes("--skills-only");
+// Skills, categories and goals live in the roles-skills and goals cells; opportunities stay in SQLite.
+const rolesSkills = openCellStore("roles-skills", "portfolio-seeder", { channel: "cli" });
+const goalsCell = openCellStore("goals", "portfolio-seeder", { channel: "cli" });
 
 // =====================================================
 // SEED SKILL CATEGORIES
@@ -214,18 +218,18 @@ const categories = [
     },
 ];
 
+const knownCategories = new Set((await rolesSkills.list("skill-categories")).map((c) => c.slug));
 for (const cat of categories) {
-    db.prepare(
-        "INSERT OR IGNORE INTO skill_categories (name, slug, description, icon, color) VALUES (?, ?, ?, ?, ?)",
-    ).run(cat.name, cat.slug, cat.description, cat.icon, cat.color);
+    if (knownCategories.has(cat.slug)) continue; // INSERT OR IGNORE
+    await rolesSkills.create("skill-categories", {
+        name: cat.name, slug: cat.slug, description: cat.description, icon: cat.icon, color: cat.color,
+    });
 }
 console.log(`Seeded ${categories.length} skill categories`);
 
 // Get category IDs
 const categoryMap: Record<string, number> = {};
-const allCats = db
-    .prepare("SELECT id, slug FROM skill_categories")
-    .all() as any[];
+const allCats = await rolesSkills.list("skill-categories");
 for (const cat of allCats) {
     categoryMap[cat.slug] = cat.id;
 }
@@ -591,20 +595,19 @@ const skills = [
     },
 ];
 
+const knownSkills = new Set((await rolesSkills.list("skills")).map((s) => s.slug));
 for (const skill of skills) {
     const catId = categoryMap[skill.category];
-    if (catId) {
-        db.prepare(
-            "INSERT OR IGNORE INTO skills (name, slug, category_id, target_level, priority, status, progress_percent) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ).run(
-            skill.name,
-            skill.slug,
-            catId,
-            skill.target_level,
-            skill.priority,
-            "not_started",
-            0,
-        );
+    if (catId && !knownSkills.has(skill.slug)) { // INSERT OR IGNORE
+        await rolesSkills.create("skills", {
+            name: skill.name,
+            slug: skill.slug,
+            category_id: catId,
+            target_level: skill.target_level,
+            priority: skill.priority,
+            status: "not_started",
+            progress_percent: 0,
+        });
     }
 }
 console.log(`Seeded ${skills.length} skills`);
@@ -831,34 +834,28 @@ const goals = [
     },
 ];
 
-const insertGoal = db.prepare(`
-    INSERT INTO goals (
-        title, description, type, category, priority, status, progress_percent
-    )
-    SELECT ?, ?, ?, ?, ?, ?, ?
-    WHERE NOT EXISTS (
-        SELECT 1 FROM goals WHERE title = ?
-    )
-`);
-
-const seedGoals = db.transaction(() => {
+// Insert a goal only when no goal with the same title exists yet.
+async function seedGoals(): Promise<number> {
+    const known = new Set((await goalsCell.list("goals")).map((g) => g.title));
     let inserted = 0;
     for (const goal of goals) {
-        inserted += insertGoal.run(
-            goal.title,
-            goal.description,
-            goal.type,
-            goal.category,
-            goal.priority,
-            "active",
-            0,
-            goal.title,
-        ).changes;
+        if (known.has(goal.title)) continue;
+        await goalsCell.create("goals", {
+            title: goal.title,
+            description: goal.description,
+            type: goal.type,
+            category: goal.category,
+            priority: goal.priority,
+            status: "active",
+            progress_percent: 0,
+        });
+        known.add(goal.title);
+        inserted += 1;
     }
     return inserted;
-});
+}
 
-const insertedGoals = skillsOnly ? 0 : seedGoals.immediate();
+const insertedGoals = skillsOnly ? 0 : await seedGoals();
 if (skillsOnly) {
     console.log("Skills-only mode: skipped business goal defaults");
 } else {

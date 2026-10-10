@@ -1,6 +1,18 @@
 import { z } from "zod";
 import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { openCellStore } from "../cell-store.js";
+
+// Projects live in the projects cell; conversation logs stay in SQLite and are joined here.
+const projectsCell = () => openCellStore("projects", "legacy-mcp", { channel: "mcp" });
+async function projectsById(logs: Array<{ project_id?: number | null }>): Promise<Map<number, { name: string; slug: string }>> {
+    if (!logs.some((l) => l.project_id != null)) return new Map();
+    return new Map((await projectsCell().list("projects")).map((p) => [p.id, { name: p.name, slug: p.slug }]));
+}
+function withProject<T extends { project_id?: number | null }>(log: T, projects: Map<number, { name: string; slug: string }>) {
+    const project = log.project_id == null ? undefined : projects.get(log.project_id);
+    return { ...log, project_name: project?.name ?? null, project_slug: project?.slug ?? null };
+}
 
 export function registerAiConversationsTools({
     server,
@@ -42,9 +54,7 @@ export function registerAiConversationsTools({
             // Resolve project_id from slug if provided
             let projectId = params.project_id;
             if (!projectId && params.project_slug) {
-                const project = db
-                    .prepare("SELECT id FROM projects WHERE slug = ?")
-                    .get(params.project_slug) as any;
+                const project = (await projectsCell().list("projects")).find((p) => p.slug === params.project_slug);
                 if (project) {
                     projectId = project.id;
                 }
@@ -115,8 +125,10 @@ export function registerAiConversationsTools({
                 conditions.push("acl.project_id = ?");
                 values.push(params.project_id);
             } else if (params.project_slug) {
-                conditions.push("p.slug = ?");
-                values.push(params.project_slug);
+                // An unknown slug matches nothing, like the old join on p.slug.
+                const project = (await projectsCell().list("projects")).find((p) => p.slug === params.project_slug);
+                conditions.push("acl.project_id = ?");
+                values.push(project?.id ?? -1);
             }
             if (params.category) {
                 conditions.push("acl.category = ?");
@@ -134,22 +146,22 @@ export function registerAiConversationsTools({
             const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
             values.push(params.limit, params.offset || 0);
 
-            const logs = db
+            const rawLogs = db
                 .prepare(
-                    `SELECT acl.*, p.name as project_name, p.slug as project_slug
+                    `SELECT acl.*
                      FROM ai_conversation_logs acl
-                     LEFT JOIN projects p ON acl.project_id = p.id
                      ${where}
                      ORDER BY acl.logged_at DESC
                      LIMIT ? OFFSET ?`,
                 )
-                .all(...values);
+                .all(...values) as any[];
+            const projects = await projectsById(rawLogs);
+            const logs = rawLogs.map((log) => withProject(log, projects));
 
             const total = db
                 .prepare(
                     `SELECT COUNT(*) as count
                      FROM ai_conversation_logs acl
-                     LEFT JOIN projects p ON acl.project_id = p.id
                      ${where}`,
                 )
                 .get(...values.slice(0, -2)) as any;
@@ -177,18 +189,14 @@ export function registerAiConversationsTools({
         },
         async (params) => {
             const db = await getDb();
-            const log = db
-                .prepare(
-                    `SELECT acl.*, p.name as project_name, p.slug as project_slug
-                     FROM ai_conversation_logs acl
-                     LEFT JOIN projects p ON acl.project_id = p.id
-                     WHERE acl.id = ?`,
-                )
-                .get(params.id);
+            const row = db
+                .prepare("SELECT acl.* FROM ai_conversation_logs acl WHERE acl.id = ?")
+                .get(params.id) as any;
 
-            if (!log) {
+            if (!row) {
                 return { content: [{ type: "text", text: "Conversation log not found" }] };
             }
+            const log = withProject(row, await projectsById([row]));
 
             return {
                 content: [
@@ -258,29 +266,37 @@ export function registerAiConversationsTools({
             const byCategory = db
                 .prepare("SELECT category, COUNT(*) as count FROM ai_conversation_logs GROUP BY category ORDER BY count DESC")
                 .all();
-            const byProject = db
+            const projectCounts = db
                 .prepare(
-                    `SELECT p.name as project_name, p.slug as project_slug, COUNT(*) as count
-                     FROM ai_conversation_logs acl
-                     LEFT JOIN projects p ON acl.project_id = p.id
-                     GROUP BY acl.project_id
+                    `SELECT project_id, COUNT(*) as count
+                     FROM ai_conversation_logs
+                     GROUP BY project_id
                      ORDER BY count DESC`,
                 )
-                .all();
+                .all() as any[];
+            const projects = await projectsById(projectCounts);
+            const byProject = projectCounts.map((row) => {
+                const { project_name, project_slug } = withProject(row, projects);
+                return { project_name, project_slug, count: row.count };
+            });
             const byProvider = db
                 .prepare("SELECT ai_provider, COUNT(*) as count FROM ai_conversation_logs WHERE ai_provider IS NOT NULL GROUP BY ai_provider ORDER BY count DESC")
                 .all();
             const bookmarked = db
                 .prepare("SELECT COUNT(*) as count FROM ai_conversation_logs WHERE is_bookmarked = 1")
                 .get() as any;
-            const recent = db
+            const recentRows = db
                 .prepare(
-                    `SELECT acl.id, acl.title, acl.category, acl.ai_provider, acl.logged_at, p.name as project_name
+                    `SELECT acl.id, acl.title, acl.category, acl.ai_provider, acl.logged_at, acl.project_id
                      FROM ai_conversation_logs acl
-                     LEFT JOIN projects p ON acl.project_id = p.id
                      ORDER BY acl.logged_at DESC LIMIT 5`,
                 )
-                .all();
+                .all() as any[];
+            const recentProjects = await projectsById(recentRows);
+            const recent = recentRows.map(({ project_id, ...row }) => ({
+                ...row,
+                project_name: withProject({ project_id }, recentProjects).project_name,
+            }));
 
             return {
                 content: [

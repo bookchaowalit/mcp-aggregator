@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { openCellStore } from "../cell-store.js";
+import { skillStats, sortRows, withCategory } from "../portfolio-reads.js";
+
+// Skills and their categories live in the roles-skills cell; progress_log stays in SQLite.
+const rolesSkills = () => openCellStore("roles-skills", "legacy-mcp", { channel: "mcp" });
 
 export function registerSkillsTools({
     server,
@@ -25,33 +30,20 @@ export function registerSkillsTools({
             limit: z.number().optional().default(100),
         },
         async (params) => {
-            const db = await getDb();
-            let query = `SELECT s.*, sc.name as category_name FROM skills s LEFT JOIN skill_categories sc ON s.category_id = sc.id WHERE 1=1`;
-            const args: any[] = [];
-            if (params.category) {
-                query += " AND sc.slug = ?";
-                args.push(params.category);
-            }
-            if (params.status) {
-                query += " AND s.status = ?";
-                args.push(params.status);
-            }
-            if (params.level) {
-                query += " AND s.level = ?";
-                args.push(params.level);
-            }
-            if (params.target_level) {
-                query += " AND s.target_level = ?";
-                args.push(params.target_level);
-            }
-            query += " ORDER BY s.priority ASC, s.progress_percent DESC LIMIT ?";
-            args.push(params.limit);
-            const skills = db.prepare(query).all(...args);
-            const stats = db
-                .prepare(
-                    `SELECT COUNT(*) as total, AVG(progress_percent) as avg_progress, SUM(hours_invested) as total_hours FROM skills`,
-                )
-                .get();
+            const cell = rolesSkills();
+            const filters: Record<string, string> = {};
+            if (params.status) filters.status = params.status;
+            if (params.level) filters.level = params.level;
+            if (params.target_level) filters.target_level = params.target_level;
+            const allSkills = await cell.list("skills");
+            const categories = await cell.list("skill-categories");
+            const matching = await cell.list("skills", filters);
+            let joined = withCategory(matching, categories);
+            if (params.category) joined = joined.filter((s) => s.category_slug === params.category);
+            const skills = sortRows(joined, ["priority"], ["progress_percent", "desc"])
+                .slice(0, params.limit)
+                .map(({ category_slug, ...skill }) => skill);
+            const stats = skillStats(allSkills);
             return {
                 content: [
                     {
@@ -72,19 +64,16 @@ export function registerSkillsTools({
         },
         async (params) => {
             const db = await getDb();
-            let skill;
+            const cell = rolesSkills();
+            let skill: any;
             if (params.id) {
-                skill = db
-                    .prepare(
-                        "SELECT s.*, sc.name as category_name FROM skills s LEFT JOIN skill_categories sc ON s.category_id = sc.id WHERE s.id = ?",
-                    )
-                    .get(params.id);
+                skill = await cell.get("skills", params.id);
             } else if (params.slug) {
-                skill = db
-                    .prepare(
-                        "SELECT s.*, sc.name as category_name FROM skills s LEFT JOIN skill_categories sc ON s.category_id = sc.id WHERE s.slug = ?",
-                    )
-                    .get(params.slug);
+                skill = (await cell.list("skills")).find((s) => s.slug === params.slug);
+            }
+            if (skill) {
+                const category = skill.category_id == null ? null : await cell.get("skill-categories", skill.category_id);
+                skill = { ...skill, category_name: category?.name ?? null };
             }
             if (!skill)
                 return { content: [{ type: "text", text: "Skill not found" }] };
@@ -120,26 +109,18 @@ export function registerSkillsTools({
             notes: z.string().optional(),
         },
         async (params) => {
-            const db = await getDb();
-            const result = db
-                .prepare(
-                    `INSERT INTO skills (name, slug, description, category_id, level, target_level, status, priority, progress_percent, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                )
-                .run(
-                    params.name,
-                    params.slug,
-                    params.description || null,
-                    params.category_id || null,
-                    params.level || null,
-                    params.target_level || null,
-                    params.status || "not_started",
-                    params.priority || 3,
-                    params.progress_percent || 0,
-                    params.notes || null,
-                );
-            const skill = db
-                .prepare("SELECT * FROM skills WHERE id = ?")
-                .get(result.lastInsertRowid);
+            const skill = await rolesSkills().create("skills", {
+                name: params.name,
+                slug: params.slug,
+                description: params.description || null,
+                category_id: params.category_id || null,
+                level: params.level || null,
+                target_level: params.target_level || null,
+                status: params.status || "not_started",
+                priority: params.priority || 3,
+                progress_percent: params.progress_percent || 0,
+                notes: params.notes || null,
+            });
             return {
                 content: [
                     {
@@ -180,27 +161,16 @@ export function registerSkillsTools({
                 what_learned,
                 ...rest
             } = params;
-            const current = db
-                .prepare("SELECT progress_percent FROM skills WHERE id = ?")
-                .get(id) as any;
+            const cell = rolesSkills();
+            const current = await cell.get("skills", id);
             if (!current)
                 return { content: [{ type: "text", text: "Skill not found" }] };
 
-            const sets: string[] = [];
-            const vals: any[] = [];
+            const fields: Record<string, unknown> = {};
             for (const [k, v] of Object.entries(rest)) {
-                if (v !== undefined) {
-                    sets.push(`${k} = ?`);
-                    vals.push(v);
-                }
+                if (v !== undefined) fields[k] = v;
             }
-            if (sets.length > 0) {
-                sets.push("updated_at = CURRENT_TIMESTAMP");
-                vals.push(id);
-                db.prepare(`UPDATE skills SET ${sets.join(", ")} WHERE id = ?`).run(
-                    ...vals,
-                );
-            }
+            const skill = Object.keys(fields).length > 0 ? await cell.update("skills", id, fields) : current;
 
             if (log_activity && activity_title) {
                 db.prepare(
@@ -217,7 +187,6 @@ export function registerSkillsTools({
                 );
             }
 
-            const skill = db.prepare("SELECT * FROM skills WHERE id = ?").get(id);
             return {
                 content: [
                     {

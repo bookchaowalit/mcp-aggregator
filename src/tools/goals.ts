@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { openCellStore } from "../cell-store.js";
+import { sortRows } from "../portfolio-reads.js";
+
+const goalsCell = () => openCellStore("goals", "legacy-mcp", { channel: "mcp" });
 
 export function registerGoalsTools({
     server,
@@ -23,30 +27,16 @@ export function registerGoalsTools({
             category: z.string().optional(),
         },
         async (params) => {
-            const db = await getDb();
-            let query = "SELECT * FROM goals WHERE 1=1";
-            const args: any[] = [];
-            if (params.type) {
-                query += " AND type = ?";
-                args.push(params.type);
-            }
-            if (params.status) {
-                query += " AND status = ?";
-                args.push(params.status);
-            }
-            if (params.category) {
-                query += " AND category = ?";
-                args.push(params.category);
-            }
-            query += " ORDER BY priority ASC, due_date ASC";
-            const goals = db.prepare(query).all(...args) as any[];
+            const cell = goalsCell();
+            const filters: Record<string, string> = {};
+            if (params.type) filters.type = params.type;
+            if (params.status) filters.status = params.status;
+            if (params.category) filters.category = params.category;
+            const goals = sortRows(await cell.list("goals", filters), ["priority"], ["due_date"]);
+            const goalTasks = sortRows(await cell.list("goal-tasks"), ["sort_order"]);
             const goalsWithTasks = goals.map((g) => ({
                 ...g,
-                tasks: db
-                    .prepare(
-                        "SELECT * FROM goal_tasks WHERE goal_id = ? ORDER BY sort_order",
-                    )
-                    .all(g.id),
+                tasks: goalTasks.filter((t) => t.goal_id === g.id),
             }));
             return {
                 content: [
@@ -69,25 +59,17 @@ export function registerGoalsTools({
             due_date: z.string().optional(),
         },
         async (params) => {
-            const db = await getDb();
-            const result = db
-                .prepare(
-                    "INSERT INTO goals (title, description, type, category, priority, start_date, due_date, status, progress_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                )
-                .run(
-                    params.title,
-                    params.description || null,
-                    params.type,
-                    params.category,
-                    params.priority || 3,
-                    params.start_date || null,
-                    params.due_date || null,
-                    "planning",
-                    0,
-                );
-            const goal = db
-                .prepare("SELECT * FROM goals WHERE id = ?")
-                .get(result.lastInsertRowid);
+            const goal = await goalsCell().create("goals", {
+                title: params.title,
+                description: params.description || null,
+                type: params.type,
+                category: params.category,
+                priority: params.priority || 3,
+                start_date: params.start_date || null,
+                due_date: params.due_date || null,
+                status: "planning",
+                progress_percent: 0,
+            });
             return {
                 content: [
                     {
@@ -111,25 +93,15 @@ export function registerGoalsTools({
             priority: z.number().optional(),
         },
         async ({ id, ...params }) => {
-            const db = await getDb();
-            const sets: string[] = [];
-            const vals: any[] = [];
+            const cell = goalsCell();
+            const fields: Record<string, unknown> = {};
             for (const [k, v] of Object.entries(params)) {
-                if (v !== undefined) {
-                    sets.push(`${k} = ?`);
-                    vals.push(v);
-                }
+                if (v !== undefined) fields[k] = v;
             }
-            if (params.status === "completed")
-                sets.push("completed_at = CURRENT_TIMESTAMP");
-            if (sets.length > 0) {
-                sets.push("updated_at = CURRENT_TIMESTAMP");
-                vals.push(id);
-                db.prepare(`UPDATE goals SET ${sets.join(", ")} WHERE id = ?`).run(
-                    ...vals,
-                );
-            }
-            const goal = db.prepare("SELECT * FROM goals WHERE id = ?").get(id);
+            if (params.status === "completed") fields.completed_at = new Date().toISOString();
+            const goal = Object.keys(fields).length > 0
+                ? await cell.update("goals", id, fields)
+                : await cell.get("goals", id);
             return {
                 content: [
                     {

@@ -568,22 +568,22 @@ export function automationToken(
 }
 
 /** https, or http to a loopback host only; the message never echoes the URL (it may carry credentials). */
-export function validateApiUrl(url: string): string {
+export function validateApiUrl(url: string, name: string = "EMPIRE_TASKS_API"): string {
     let parsed: URL;
     try {
         parsed = new URL(url);
     } catch {
-        throw new Error("EMPIRE_TASKS_API is not a valid URL");
+        throw new Error(`${name} is not a valid URL`);
     }
     const host = parsed.hostname.toLowerCase();
     if (parsed.protocol === "https:" && host) return url;
     if (parsed.protocol === "http:" && ["127.0.0.1", "[::1]", "::1", "localhost"].includes(host)) return url;
-    throw new Error("EMPIRE_TASKS_API must be an https URL (http only for 127.0.0.1, ::1 or localhost)");
+    throw new Error(`${name} must be an https URL (http only for 127.0.0.1, ::1 or localhost)`);
 }
 
 // ─── Client config file ───────────────────────────────────────
 
-const CLIENT_KEYS = ["SOLO_EMPIRE_TASKS_BACKEND", "EMPIRE_TASKS_API"];
+const CLIENT_KEYS = ["SOLO_EMPIRE_TASKS_BACKEND", "EMPIRE_TASKS_API", "EMPIRE_HABITS_API"];
 
 export const SQLITE_RETIRED =
     "the SQLite task backend was retired on 2026-10-09; tasks live in the Tasks API";
@@ -623,6 +623,13 @@ function readClientFile(path: string): Record<string, string> {
         if (CLIENT_KEYS.includes(key)) values[key] = value;
     }
     return values;
+}
+
+/** One allowlisted client setting: non-empty env, else the client file; "" when unset. */
+export function clientValue(key: string, env: NodeJS.ProcessEnv = process.env): string {
+    if (!CLIENT_KEYS.includes(key)) throw new Error(`${key} is not a client setting`);
+    if ((env[key] || "").trim()) return (env[key] as string).trim();
+    return readClientFile(clientConfigPath(env))[key] || "";
 }
 
 /**

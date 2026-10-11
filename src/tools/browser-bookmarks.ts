@@ -3,6 +3,19 @@ import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
 
 /**
+ * The Brave bookmark workflow moved to the bookchaowalit/solo-data-lake repository.
+ * Resolve its sibling checkout (override: SOLO_DATA_LAKE_ROOT).
+ */
+export function dataLakeRoot(repoRoot: string): string {
+    return process.env.SOLO_DATA_LAKE_ROOT
+        ? resolve(process.env.SOLO_DATA_LAKE_ROOT)
+        : resolve(
+              repoRoot,
+              "projects/product/engineering/book-dev/github/bookchaowalit/private/solo-data-lake",
+          );
+}
+
+/**
  * AI-facing boundary for Brave bookmark knowledge intake.
  *
  * This tool only manages private proposals. It never writes the live Brave
@@ -12,7 +25,8 @@ import type { ToolContext } from "../tool-context.js";
 export function registerBrowserBookmarkTools({
     server,
     runPyScript,
-    scriptsDir: SCRIPTS_DIR,
+    repoRoot,
+    fs,
 }: ToolContext): void {
     server.tool(
         "manage_brave_bookmark_proposals",
@@ -29,7 +43,14 @@ export function registerBrowserBookmarkTools({
             proposal_id: z.string().optional().describe("Proposal ID; required for approve or reject"),
         },
         async (params) => {
-            const script = resolve(SCRIPTS_DIR, "sync", "brave_bookmark_workflow.py");
+            const lakeRoot = dataLakeRoot(repoRoot);
+            const script = resolve(lakeRoot, "infra", "scripts", "sync", "brave_bookmark_workflow.py");
+            if (!fs.existsSync(script)) {
+                throw new Error(
+                    `brave_bookmark_workflow.py not found at ${script}. It moved to the bookchaowalit/solo-data-lake ` +
+                        "repository; clone it as a sibling checkout or set SOLO_DATA_LAKE_ROOT to its path.",
+                );
+            }
             const args: string[] = [];
 
             const append = (flag: string, value: string | undefined) => {

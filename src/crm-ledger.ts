@@ -1,6 +1,6 @@
 /**
  * Client of the CRM ledger (revenue, invoices, clients) on the owner's
- * income-pipeline CRM. Mirrors infra/scripts/utils/crm_ledger.py.
+ * income-pipeline CRM. Mirrors solo-ops infra/scripts/utils/crm_ledger.py.
  *
  * Revenue, invoices and clients left the control plane on 2026-10-11 for the
  * CRM (bookchaowalit/solo-crm). The URL comes from EMPIRE_CRM_LEDGER_API

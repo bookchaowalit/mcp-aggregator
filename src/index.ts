@@ -4,20 +4,25 @@ import { execFile } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
 import * as fs from "fs";
+import { opsRoot, opsScriptsDir } from "./roots.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-// Repo root: infra/mcp-server/src (or dist) -> ../../..
-const REPO_ROOT = resolve(__dirname, "..", "..", "..");
-const SCRIPTS_DIR = resolve(REPO_ROOT, "infra", "scripts");
+// The Python scripts the tools shell out to live in the solo-ops checkout (SOLO_OPS_ROOT, default ../solo-ops).
+const REPO_ROOT = opsRoot();
+const SCRIPTS_DIR = opsScriptsDir();
 const PYTHON = process.env.PYTHON || "python3";
 
 /** Helper: run a Python script with --json and return parsed result */
 function runPyScript(scriptPath: string, args: string[] = []): Promise<any> {
     return new Promise((resolve, reject) => {
+        if (!fs.existsSync(scriptPath)) {
+            reject(new Error(`script not found: ${scriptPath}; clone bookchaowalit/solo-ops as a sibling or set SOLO_OPS_ROOT / SOLO_OPS_SCRIPTS_DIR`));
+            return;
+        }
         const fullArgs = [scriptPath, ...args, "--json"];
         execFile(PYTHON, fullArgs, {
-            cwd: REPO_ROOT,
+            cwd: fs.existsSync(REPO_ROOT) ? REPO_ROOT : process.cwd(),
             timeout: 30_000,
             maxBuffer: 2 * 1024 * 1024,
         }, (err, stdout, stderr) => {

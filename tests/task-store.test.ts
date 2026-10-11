@@ -3,7 +3,6 @@ import { after, test } from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -23,7 +22,6 @@ import { SqliteTaskStore, TASKS_DDL } from "./support/sqlite-task-store.js";
 import { planTaskUpdate, updateTask } from "../src/task-state.js";
 import { registerCustomizationTools } from "../src/tools/customization.js";
 
-const root = fileURLToPath(new URL("../../../", import.meta.url));
 
 function fixture() {
     const db = new Database(":memory:");

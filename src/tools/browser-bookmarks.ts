@@ -1,19 +1,7 @@
 import { z } from "zod";
 import { resolve } from "path";
+import { dataLakeRoot } from "../roots.js";
 import type { ToolContext } from "../tool-context.js";
-
-/**
- * The Brave bookmark workflow moved to the bookchaowalit/solo-data-lake repository.
- * Resolve its sibling checkout (override: SOLO_DATA_LAKE_ROOT).
- */
-export function dataLakeRoot(repoRoot: string): string {
-    return process.env.SOLO_DATA_LAKE_ROOT
-        ? resolve(process.env.SOLO_DATA_LAKE_ROOT)
-        : resolve(
-              repoRoot,
-              "projects/product/engineering/book-dev/github/bookchaowalit/private/solo-data-lake",
-          );
-}
 
 /**
  * AI-facing boundary for Brave bookmark knowledge intake.
@@ -25,7 +13,6 @@ export function dataLakeRoot(repoRoot: string): string {
 export function registerBrowserBookmarkTools({
     server,
     runPyScript,
-    repoRoot,
     fs,
 }: ToolContext): void {
     server.tool(
@@ -43,7 +30,7 @@ export function registerBrowserBookmarkTools({
             proposal_id: z.string().optional().describe("Proposal ID; required for approve or reject"),
         },
         async (params) => {
-            const lakeRoot = dataLakeRoot(repoRoot);
+            const lakeRoot = dataLakeRoot();
             const script = resolve(lakeRoot, "infra", "scripts", "sync", "brave_bookmark_workflow.py");
             if (!fs.existsSync(script)) {
                 throw new Error(

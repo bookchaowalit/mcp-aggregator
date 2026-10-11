@@ -1,20 +1,24 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { mkdtempSync, readFileSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerTasksTools } from "../src/tools/tasks.js";
 import { buildTaskUpdate } from "../src/task-state.js";
+import { MCP_ROOT, opsRoot } from "../src/roots.js";
 import { overrideTaskStoreForTests } from "../src/task-store.js";
 import { SqliteTaskStore, TASKS_DDL, TASK_ROLE_SUGGESTIONS_DDL } from "./support/sqlite-task-store.js";
 
-const root = fileURLToPath(new URL("../../../", import.meta.url));
+// The owner CLI (tasks done/update/list...) lives in the solo-ops checkout (SOLO_OPS_ROOT, default ../solo-ops).
+// Tests that drive it skip clearly when that checkout is absent.
+const opsCli = join(opsRoot(), "infra", "cli.ts");
+const hasOps = existsSync(opsCli);
+const skipNoOps = hasOps ? false : `solo-ops owner CLI not found at ${opsCli}; set SOLO_OPS_ROOT to run`;
 const directory = mkdtempSync(join(tmpdir(), "solo-task-lifecycle-"));
 const dbPath = join(directory, "tasks.db");
 const db = new Database(dbPath);
@@ -51,10 +55,10 @@ async function callTool(name: string, args: Record<string, unknown>) {
 function runCli(...args: string[]) {
     const result = spawnSync(
         process.execPath,
-        [join(root, "infra", "node_modules", "tsx", "dist", "cli.mjs"), join(root, "infra", "mcp-server", "tests", "support", "run-cli-with-sqlite-tasks.ts"), "tasks", ...args],
+        [join(MCP_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), join(MCP_ROOT, "tests", "support", "run-cli-with-sqlite-tasks.ts"), "tasks", ...args],
         {
-            cwd: root,
-            env: { ...process.env, SOLO_EMPIRE_DB_PATH: dbPath, SOLO_EMPIRE_ROOT: directory, PATH: directory },
+            cwd: opsRoot(),
+            env: { ...process.env, SOLO_EMPIRE_DB_PATH: dbPath, SOLO_OPS_CLI: opsCli, SOLO_OPS_ROOT: directory, PATH: directory },
             encoding: "utf8",
             timeout: 15000,
         },
@@ -70,7 +74,7 @@ function taskRow(id: number) {
 }
 
 test("MCP completion, update-to-done, and CLI completion share the same invariant", async () => {
-    for (const mode of ["complete_task", "update_task", "cli_done", "cli_update"]) {
+    for (const mode of ["complete_task", "update_task", "cli_done", "cli_update"].filter((m) => hasOps || !m.startsWith("cli_"))) {
         const created = await callTool("create_task", { title: `Fixture ${mode}` });
         const id = created.data.task.id as number;
         if (mode === "cli_done") {
@@ -110,13 +114,15 @@ test("CLI and MCP hide archived tasks in lists and sync summaries", async () => 
     assert.equal(status.data.total, expected.count);
     assert.ok(!JSON.stringify(status.data).includes("ARCHIVED_FIXTURE_MUST_NOT_APPEAR"));
     assert.ok(!JSON.stringify(status.data).includes("archived-only-project"));
-    const cli = runCli("list");
-    assert.equal(cli.status, 0, cli.stderr);
-    assert.ok(!cli.stdout.includes("ARCHIVED_FIXTURE_MUST_NOT_APPEAR"));
-    assert.match(cli.stdout, new RegExp(`Personal: ${expected.count}`));
+    if (hasOps) {
+        const cli = runCli("list");
+        assert.equal(cli.status, 0, cli.stderr);
+        assert.ok(!cli.stdout.includes("ARCHIVED_FIXTURE_MUST_NOT_APPEAR"));
+        assert.match(cli.stdout, new RegExp(`Personal: ${expected.count}`));
+    }
 });
 
-test("sync, push, and pull return nonzero when their Go runtime is unavailable", () => {
+test("sync, push, and pull return nonzero when their Go runtime is unavailable", { skip: skipNoOps }, () => {
     for (const action of ["sync", "push", "pull"]) {
         const result = runCli(action);
         assert.equal(result.status, 1);
@@ -125,11 +131,11 @@ test("sync, push, and pull return nonzero when their Go runtime is unavailable",
     }
 });
 
-test("task entrypoint refuses to run without the Tasks API switch (no SQLite fallback)", () => {
+test("task entrypoint refuses to run without the Tasks API switch (no SQLite fallback)", { skip: skipNoOps }, () => {
     const taskResult = spawnSync("task", ["tasks", "--", "--project", "__fixture_no_match__"], {
-        cwd: root,
+        cwd: opsRoot(),
         env: {
-            ...process.env, SOLO_EMPIRE_DB_PATH: dbPath, SOLO_EMPIRE_ROOT: directory,
+            ...process.env, SOLO_EMPIRE_DB_PATH: dbPath, SOLO_OPS_ROOT: directory,
             EMPIRE_CLIENT_CONFIG: join(directory, "absent-client.env"),
             SOLO_EMPIRE_TASKS_BACKEND: "", EMPIRE_TASKS_API: "",
         },
@@ -240,7 +246,7 @@ test("MCP create_task keeps explicit timestamps, sync state, tags, and list orde
     for (let i = 1; i < ordered.length; i++) assert.ok(ordered[i - 1].priority <= ordered[i].priority);
 });
 
-test("CLI add, update, done and list run against the temp database", () => {
+test("CLI add, update, done and list run against the temp database", { skip: skipNoOps }, () => {
     const added = runCli("add", "--title", "CLI row", "--priority", "2", "--project", "cli-fixture", "--due", "2026-11-01");
     assert.equal(added.status, 0, added.stderr);
     const id = Number(/Task #(\d+) created: CLI row \(priority: 2\)/.exec(added.stdout)?.[1]);

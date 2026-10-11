@@ -1,0 +1,19 @@
+version: "3"
+
+tasks:
+  install:
+    desc: Install dependencies
+    cmds:
+      - npm ci
+  check:
+    desc: Typecheck and run the tests (standalone; tests that need sibling repos skip)
+    cmds:
+      - npx tsc --noEmit
+      - npx tsx --test tests/*.test.ts
+  test:
+    desc: Alias of check
+    cmds:
+      - task: check
+  build:
+    cmds:
+      - npm run build

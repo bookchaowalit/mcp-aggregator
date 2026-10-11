@@ -1,6 +1,6 @@
 /**
  * TaskStore adapter for the TypeScript runtimes (dashboard server, MCP server,
- * owner CLI). Mirrors infra/scripts/utils/task_store.py (reads plus the task
+ * owner CLI). Mirrors solo-ops infra/scripts/utils/task_store.py (reads plus the task
  * write surface: get, create, update, complete, archive, unarchive):
  *
  *   SOLO_EMPIRE_TASKS_BACKEND=api      # required; "sqlite" was retired on 2026-10-09
@@ -12,14 +12,12 @@
  * env var wins, then the file; nothing configured is an error. See clientSettings().
  *
  * No other TypeScript file reads or writes the task tables directly. Tasks are
- * never hard-deleted; use archive(). Every method is async because the API backend is. Lives under mcp-server/src so both
- * `infra/tsconfig.json` (dashboard) and `infra/mcp-server/tsconfig.json`
- * (rootDir: src) can import it.
+ * never hard-deleted; use archive(). Every method is async because the API backend is. Lives in solo-mcp/src so the owner CLI (solo-ops) and the MCP server share it.
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { opsRoot } from "./roots.js";
 
 export const AUTOMATION_ID = "dashboard-api";
 
@@ -549,9 +547,9 @@ export class ApiTaskStore implements TaskStore {
 
 // ─── Factory ──────────────────────────────────────────────────
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const REPO_ROOT = opsRoot();
 
-/** Token files are looked up in <repo>/.runtime/automation-tokens, then ~/.config/empire-platform/tokens. */
+/** Token files are looked up in <solo-ops>/.runtime/automation-tokens, then ~/.config/empire-platform/tokens. */
 export function automationToken(
     name: string, env: NodeJS.ProcessEnv = process.env, root: string = REPO_ROOT, home: string = homedir(),
 ): string {

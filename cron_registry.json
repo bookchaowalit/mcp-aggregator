@@ -7,7 +7,6 @@
     "engagement_notifications": "utils/engagement_notifications.py",
     "update_goals": "utils/goal_progress.py",
     "auto_archive": "utils/cleanup.py",
-    "revenue_autorun": "utils/revenue_autorun.py",
     "weekly_habit_autogranted": "utils/weekly_habit_autogranted.py",
     "weekly_review_gen": "utils/weekly_review_gen.py",
     "goal_progress": "utils/goal_progress.py",
@@ -20,12 +19,9 @@
     "daily_diary": "workflows/daily_diary.py",
     "diary_weekly_summary": "workflows/diary_summary.py",
     "diary_monthly_summary": "workflows/diary_summary.py",
-    "sales_pipeline": "workflows/sales_pipeline.py",
     "book_dev_loop": "workflows/book_dev_loop.py",
     "decision_brief_daily": "workflows/decision_brief.py",
     "decision_brief_weekly": "workflows/decision_brief.py",
-    "finance_daily_review": "workflows/finance_daily_review.py",
-    "finance_daily_notification": "workflows/finance_daily_notification.py",
     "job_data_readiness": "data_lake/job_data_readiness.py",
     "backup_db": "db/offhost_backup.py",
     "media_lifecycle": "utils/media_lifecycle.py",
@@ -54,10 +50,7 @@
     "media_lifecycle": 600,
     "cron_heal": 600,
     "book_dev_loop": 600,
-    "sales_pipeline": 180,
-    "finance_daily_review": 180,
-    "finance_daily_notification": 180,
     "job_data_readiness": 300
   },
-  "job_count": 45
+  "job_count": 40
 }

@@ -55,7 +55,7 @@ export function registerCronTools({
         "run_cron_job",
         "Manually trigger a cron job by type",
         {
-            job_type: z.string().describe("Job type to run (e.g. system_status, backup_db, revenue_autorun)"),
+            job_type: z.string().describe("Job type to run (e.g. system_status, backup_db)"),
             dry_run: z.boolean().optional().describe("If true, only show what would be done"),
         },
         async ({ job_type, dry_run }) => {

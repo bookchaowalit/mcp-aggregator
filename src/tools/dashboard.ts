@@ -2,6 +2,7 @@ import { z } from "zod";
 import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
 import { openCellStore } from "../cell-store.js";
+import { ledgerSection } from "../crm-ledger.js";
 import { skillStats, sortRows, withCategory } from "../portfolio-reads.js";
 
 export function registerDashboardTools({
@@ -33,11 +34,10 @@ export function registerDashboardTools({
             )
                 .slice(0, 10)
                 .map((s) => ({ name: s.name, progress_percent: s.progress_percent, status: s.status, category: s.category_name }));
-            const assetsStats = db
-                .prepare(
-                    "SELECT COUNT(*) as total, SUM(monthly_value) as monthly_value, SUM(revenue) as total_revenue FROM assets",
-                )
-                .get();
+            const revenue = await ledgerSection(async (ledger) => {
+                const { rows, totals } = await ledger.revenue({ received: true, limit: 1 });
+                return { totals, latest: rows[0]?.revenue_date ?? null };
+            });
             const activeGoals = sortRows(
                 await openCellStore("goals", "legacy-mcp", { channel: "mcp" }).list("goals", { status: ["active", "planning"] }),
                 ["priority"],
@@ -53,7 +53,7 @@ export function registerDashboardTools({
                                 profile,
                                 skills: skillsStats,
                                 topSkills,
-                                assets: assetsStats,
+                                revenue: revenue.available ? revenue.data : { available: false, reason: revenue.reason },
                                 goals: activeGoals,
                             },
                             null,

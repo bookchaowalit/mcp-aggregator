@@ -44,7 +44,6 @@ import type { ToolContext } from "./tool-context.js";
 import { registerProfileTools } from "./tools/profile.js";
 import { registerSocialTools } from "./tools/social.js";
 import { registerSkillsTools } from "./tools/skills.js";
-import { registerAssetsTools } from "./tools/assets.js";
 import { registerGoalsTools } from "./tools/goals.js";
 import { registerRevenueTools } from "./tools/revenue.js";
 import { registerDashboardTools } from "./tools/dashboard.js";
@@ -76,7 +75,6 @@ const toolContext: ToolContext = {
 registerProfileTools(toolContext);
 registerSocialTools(toolContext);
 registerSkillsTools(toolContext);
-registerAssetsTools(toolContext);
 registerGoalsTools(toolContext);
 registerRevenueTools(toolContext);
 registerDashboardTools(toolContext);

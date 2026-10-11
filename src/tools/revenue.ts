@@ -1,56 +1,33 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
-import { resolve } from "path";
 import type { ToolContext } from "../tool-context.js";
+import { ledgerSection, openCrmLedger } from "../crm-ledger.js";
 
-export function registerRevenueTools({
-    server,
-    getDb,
-    runPyScript,
-    scriptsDir: SCRIPTS_DIR,
-    repoRoot: REPO_ROOT,
-    python: PYTHON,
-    moduleDir: __dirname,
-    execFile,
-    fs,
-}: ToolContext): void {
+/** Revenue lives in the CRM ledger (income-pipeline); these tools are thin clients of its API. */
+export function registerRevenueTools({ server }: ToolContext): void {
 
     server.tool(
         "get_revenue",
-        "Get revenue records",
+        "Get revenue records from the CRM ledger",
         {
             source_type: z.string().optional(),
             start_date: z.string().optional(),
             end_date: z.string().optional(),
         },
         async (params) => {
-            const db = await getDb();
-            let query = "SELECT * FROM revenue WHERE 1=1";
-            const args: any[] = [];
-            if (params.source_type) {
-                query += " AND source_type = ?";
-                args.push(params.source_type);
-            }
-            if (params.start_date) {
-                query += " AND revenue_date >= ?";
-                args.push(params.start_date);
-            }
-            if (params.end_date) {
-                query += " AND revenue_date <= ?";
-                args.push(params.end_date);
-            }
-            query += " ORDER BY revenue_date DESC";
-            const records = db.prepare(query).all(...args);
-            return {
-                content: [
-                    { type: "text", text: JSON.stringify({ records }, null, 2) },
-                ],
-            };
+            const section = await ledgerSection((ledger) => ledger.revenue({
+                source_type: params.source_type, since: params.start_date, until: params.end_date,
+            }));
+            const body = section.available
+                ? { records: section.data.rows, totals: section.data.totals }
+                : { available: false, reason: section.reason };
+            return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }] };
         },
     );
 
     server.tool(
         "add_revenue",
-        "Add a revenue record",
+        "Add a revenue record to the CRM ledger (idempotent on the same date, type, amount, currency and source)",
         {
             source_type: z.string(),
             source_name: z.string().optional(),
@@ -60,31 +37,24 @@ export function registerRevenueTools({
             description: z.string().optional(),
         },
         async (params) => {
-            const db = await getDb();
-            const result = db
-                .prepare(
-                    "INSERT INTO revenue (source_type, source_name, amount, currency, revenue_date, description) VALUES (?, ?, ?, ?, ?, ?)",
-                )
-                .run(
-                    params.source_type,
-                    params.source_name || null,
-                    params.amount,
-                    params.currency || "THB",
-                    params.revenue_date,
-                    params.description || null,
-                );
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: JSON.stringify(
-                            { success: true, id: result.lastInsertRowid },
-                            null,
-                            2,
-                        ),
-                    },
-                ],
+            const currency = params.currency || "THB";
+            const key = "mcp:" + createHash("sha256")
+                .update(`${params.revenue_date}|${params.source_type}|${params.amount}|${currency}|${params.source_name ?? ""}`)
+                .digest("hex").slice(0, 32);
+            const fields: Record<string, unknown> = {
+                source_type: params.source_type, amount: params.amount, currency,
+                revenue_date: params.revenue_date, idempotency_key: key,
             };
+            if (params.source_name) fields.source_name = params.source_name;
+            if (params.description) fields.description = params.description;
+            let body: Record<string, unknown>;
+            try {
+                const { outcome, revenue } = await openCrmLedger().addRevenue(fields);
+                body = { success: true, outcome, id: revenue.id };
+            } catch (error) {
+                body = { success: false, available: false, reason: (error as Error).message.split("\n")[0] };
+            }
+            return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }] };
         },
     );
 

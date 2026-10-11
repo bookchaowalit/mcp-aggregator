@@ -4,7 +4,6 @@ import type { ToolContext } from "../tool-context.js";
 
 export function registerAnalyticsTools({
     server,
-    getDb,
     runPyScript,
     scriptsDir: SCRIPTS_DIR,
     repoRoot: REPO_ROOT,

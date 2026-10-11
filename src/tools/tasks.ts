@@ -19,7 +19,7 @@ function groupCount(rows: Row[], key: string): Row[] {
 
 export function registerTasksTools({
     server,
-}: Pick<ToolContext, "server" | "getDb">): void {
+}: Pick<ToolContext, "server">): void {
 
     async function openStore(): Promise<TaskStore> {
         return openTaskStore(AUTOMATION, { channel: CHANNEL });

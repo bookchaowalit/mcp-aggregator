@@ -8,7 +8,6 @@ const goalsCell = () => openCellStore("goals", "legacy-mcp", { channel: "mcp" })
 
 export function registerGoalsTools({
     server,
-    getDb,
     runPyScript,
     scriptsDir: SCRIPTS_DIR,
     repoRoot: REPO_ROOT,

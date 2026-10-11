@@ -22,7 +22,6 @@ import {
 import { SqliteTaskStore, TASKS_DDL } from "./support/sqlite-task-store.js";
 import { planTaskUpdate, updateTask } from "../src/task-state.js";
 import { registerCustomizationTools } from "../src/tools/customization.js";
-import { registerPerformanceTools } from "../src/tools/performance.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -206,9 +205,8 @@ async function mcp(db: Database.Database) {
     const server = new McpServer({ name: "fixture", version: "1.0.0" });
     const client = new Client({ name: "fixture-client", version: "1.0.0" });
     overrideTaskStoreForTests(() => new SqliteTaskStore(db)); // callers reset it with overrideTaskStoreForTests(null)
-    const context: any = { server, getDb: () => db };
+    const context: any = { server };
     registerCustomizationTools(context);
-    registerPerformanceTools(context);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     await client.connect(clientTransport);
@@ -219,35 +217,13 @@ async function mcp(db: Database.Database) {
     };
 }
 
-test("MCP run_custom_view, list_task_types and db_stats keep their old output", async () => {
+test("MCP list_task_types keeps its old output", async () => {
     const db = fixture();
-    const view = db.prepare("INSERT INTO custom_views (name, filter_criteria, sort_criteria) VALUES (?, ?, ?)");
-    view.run("v1", JSON.stringify({ status: ["todo", "blocked", "in_progress"], tags: "a" }), null);
-    view.run("v2", JSON.stringify({ priority: 2, project: "p1" }), JSON.stringify({ field: "created_at", direction: "DESC" }));
-    view.run("v3", JSON.stringify({}), JSON.stringify({ field: "due_date" }));
-    view.run("v4", JSON.stringify({}), JSON.stringify({ field: "nope" }));
     const call = await mcp(db);
     after(() => overrideTaskStoreForTests(null));
 
-    const oldView = (sql: string, ...params: any[]) => db.prepare(sql).all(...params);
-    assert.deepEqual((await call("run_custom_view", { view_id: 1 })).tasks, oldView(
-        "SELECT * FROM tasks WHERE archived_at IS NULL AND status IN (?,?,?) AND tags LIKE ? ORDER BY priority, due_date",
-        "todo", "blocked", "in_progress", "%a%"));
-    assert.deepEqual((await call("run_custom_view", { view_id: 2 })).tasks, oldView(
-        "SELECT * FROM tasks WHERE archived_at IS NULL AND priority IN (?) AND project = ? ORDER BY created_at DESC", 2, "p1"));
-    assert.deepEqual((await call("run_custom_view", { view_id: 3 })).tasks, oldView(
-        "SELECT * FROM tasks WHERE archived_at IS NULL ORDER BY due_date ASC"));
-    assert.equal((await call("run_custom_view", { view_id: 1 })).task_count, 2);
-
     assert.deepEqual((await call("list_task_types")).task_types,
         db.prepare("SELECT * FROM task_types WHERE is_active = 1 ORDER BY sort_order, name").all());
-
-    const stats = await call("db_stats");
-    assert.equal(stats.total_tasks, 5);
-    assert.deepEqual(stats.by_status, db.prepare("SELECT status, COUNT(*) as count FROM tasks GROUP BY status").all());
-    assert.deepEqual(stats.by_priority, db.prepare("SELECT priority, COUNT(*) as count FROM tasks GROUP BY priority ORDER BY priority").all());
-    assert.deepEqual(stats.top_projects, db.prepare(
-        "SELECT project, COUNT(*) as count FROM tasks WHERE project IS NOT NULL GROUP BY project ORDER BY count DESC, project LIMIT 10").all());
 });
 
 test("sqlite backend writes: get, create, update, complete, archive, unarchive", async () => {

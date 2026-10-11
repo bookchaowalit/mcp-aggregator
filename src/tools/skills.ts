@@ -9,7 +9,6 @@ const rolesSkills = () => openCellStore("roles-skills", "legacy-mcp", { channel:
 
 export function registerSkillsTools({
     server,
-    getDb,
     runPyScript,
     scriptsDir: SCRIPTS_DIR,
     repoRoot: REPO_ROOT,

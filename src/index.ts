@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { getDb, initDb, closeDb } from "./db.js";
 import { execFile } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
@@ -41,18 +40,13 @@ const server = new McpServer({
 });
 
 import type { ToolContext } from "./tool-context.js";
-import { registerProfileTools } from "./tools/profile.js";
-import { registerSocialTools } from "./tools/social.js";
 import { registerSkillsTools } from "./tools/skills.js";
 import { registerGoalsTools } from "./tools/goals.js";
 import { registerRevenueTools } from "./tools/revenue.js";
 import { registerDashboardTools } from "./tools/dashboard.js";
 import { registerTasksTools } from "./tools/tasks.js";
-import { registerCollaborationTools } from "./tools/collaboration.js";
 import { registerDecisionsTools } from "./tools/decisions.js";
-import { registerAuditTools } from "./tools/audit.js";
 import { registerCustomizationTools } from "./tools/customization.js";
-import { registerPerformanceTools } from "./tools/performance.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
 import { registerDataFreshnessTools } from "./tools/data-freshness.js";
 import { registerCronTools } from "./tools/cron.js";
@@ -62,7 +56,6 @@ import { registerSeoReportTools } from "./tools/seo-report.js";
 
 const toolContext: ToolContext = {
     server,
-    getDb,
     runPyScript,
     repoRoot: REPO_ROOT,
     scriptsDir: SCRIPTS_DIR,
@@ -71,18 +64,13 @@ const toolContext: ToolContext = {
     execFile,
     fs,
 };
-registerProfileTools(toolContext);
-registerSocialTools(toolContext);
 registerSkillsTools(toolContext);
 registerGoalsTools(toolContext);
 registerRevenueTools(toolContext);
 registerDashboardTools(toolContext);
 registerTasksTools(toolContext);
-registerCollaborationTools(toolContext);
 registerDecisionsTools(toolContext);
-registerAuditTools(toolContext);
 registerCustomizationTools(toolContext);
-registerPerformanceTools(toolContext);
 registerAnalyticsTools(toolContext);
 registerDataFreshnessTools(toolContext);
 registerCronTools(toolContext);
@@ -95,7 +83,6 @@ registerSeoReportTools(toolContext);
 // =====================================================
 
 async function main() {
-    await initDb();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error("Solo Empire MCP Server running on stdio");
@@ -106,10 +93,8 @@ main().catch((error) => {
     process.exit(1);
 });
 process.on("SIGINT", () => {
-    closeDb();
     process.exit(0);
 });
 process.on("SIGTERM", () => {
-    closeDb();
     process.exit(0);
 });

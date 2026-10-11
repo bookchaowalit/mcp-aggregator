@@ -3,7 +3,6 @@ import type { execFile } from "child_process";
 
 export type ToolContext = {
     server: McpServer;
-    getDb: typeof import("./db.js").getDb;
     runPyScript: (scriptPath: string, args?: string[]) => Promise<any>;
     repoRoot: string;
     scriptsDir: string;

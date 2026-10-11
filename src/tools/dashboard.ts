@@ -7,7 +7,6 @@ import { skillStats, sortRows, withCategory } from "../portfolio-reads.js";
 
 export function registerDashboardTools({
     server,
-    getDb,
     runPyScript,
     scriptsDir: SCRIPTS_DIR,
     repoRoot: REPO_ROOT,
@@ -22,8 +21,6 @@ export function registerDashboardTools({
         "Get a comprehensive dashboard summary",
         {},
         async () => {
-            const db = await getDb();
-            const profile = db.prepare("SELECT * FROM profile LIMIT 1").get();
             // Skills and goals live in the roles-skills and goals cells.
             const rolesSkills = openCellStore("roles-skills", "legacy-mcp", { channel: "mcp" });
             const allSkills = await rolesSkills.list("skills");
@@ -50,7 +47,6 @@ export function registerDashboardTools({
                         type: "text",
                         text: JSON.stringify(
                             {
-                                profile,
                                 skills: skillsStats,
                                 topSkills,
                                 revenue: revenue.available ? revenue.data : { available: false, reason: revenue.reason },

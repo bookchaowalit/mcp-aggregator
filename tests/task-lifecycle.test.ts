@@ -24,7 +24,7 @@ overrideTaskStoreForTests(() => new SqliteTaskStore(db));
 mkdirSync(join(directory, "infra", "go", "task-sync"), { recursive: true });
 const server = new McpServer({ name: "task-fixture", version: "1.0.0" });
 const client = new Client({ name: "task-fixture-client", version: "1.0.0" });
-registerTasksTools({ server, getDb: () => db });
+registerTasksTools({ server });
 
 before(async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

@@ -54,18 +54,4 @@ export function registerAnalyticsTools({
         },
     );
 
-    server.tool(
-        "time_analytics",
-        "Run time allocation analytics — hours by category, trends, productivity",
-        {
-            days: z.number().optional().describe("Lookback window in days"),
-        },
-        async ({ days }) => {
-            const args: string[] = [];
-            if (days) args.push("--days", String(days));
-            const result = await runPyScript(resolve(SCRIPTS_DIR, "utils", "time_analytics.py"), args);
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        },
-    );
-
 }

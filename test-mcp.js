@@ -94,15 +94,6 @@ async function testMCP() {
 
   await new Promise(resolve => setTimeout(resolve, 1000));
 
-  // Test 4: Get opportunities
-  console.log('\n💡 Test 4: Get opportunities');
-  send(createRequest('tools/call', {
-    name: 'get_opportunities',
-    arguments: {},
-  }));
-
-  await new Promise(resolve => setTimeout(resolve, 1000));
-
   // Test 5: Update skill progress
   console.log('\n📈 Test 5: Update skill progress (test)');
   send(createRequest('tools/call', {
@@ -120,13 +111,6 @@ async function testMCP() {
   }));
 
   await new Promise(resolve => setTimeout(resolve, 1000));
-
-  // Test 6: Get journal
-  console.log('\n📝 Test 6: Get journal entries');
-  send(createRequest('tools/call', {
-    name: 'get_journal',
-    arguments: { limit: 5 },
-  }));
 
   await new Promise(resolve => setTimeout(resolve, 2000));
 

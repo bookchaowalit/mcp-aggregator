@@ -38,23 +38,12 @@ export function registerDashboardTools({
                     "SELECT COUNT(*) as total, SUM(monthly_value) as monthly_value, SUM(revenue) as total_revenue FROM assets",
                 )
                 .get();
-            const activeOpportunities = db
-                .prepare(
-                    "SELECT name, tier, status, total_score FROM opportunities WHERE status IN ('researching', 'validating', 'active') ORDER BY tier ASC, total_score DESC LIMIT 5",
-                )
-                .all();
             const activeGoals = sortRows(
                 await openCellStore("goals", "legacy-mcp", { channel: "mcp" }).list("goals", { status: ["active", "planning"] }),
                 ["priority"],
             )
                 .slice(0, 5)
                 .map((g) => ({ title: g.title, type: g.type, progress_percent: g.progress_percent, due_date: g.due_date }));
-            const recentJournal = db
-                .prepare(
-                    "SELECT title, entry_type, entry_date FROM journal ORDER BY entry_date DESC LIMIT 5",
-                )
-                .all();
-
             return {
                 content: [
                     {
@@ -65,9 +54,7 @@ export function registerDashboardTools({
                                 skills: skillsStats,
                                 topSkills,
                                 assets: assetsStats,
-                                opportunities: activeOpportunities,
                                 goals: activeGoals,
-                                recentJournal,
                             },
                             null,
                             2,

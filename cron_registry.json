@@ -33,7 +33,6 @@
     "revenue_analytics": "utils/revenue_analytics.py",
     "habit_analytics": "utils/habit_analytics.py",
     "goal_velocity": "utils/goal_velocity.py",
-    "time_analytics": "utils/time_analytics.py",
     "cron_heal": "utils/cron_healer.py",
     "data_freshness": "utils/data_freshness.py",
     "sync_calendar": "sync/sync_google_calendar.py",

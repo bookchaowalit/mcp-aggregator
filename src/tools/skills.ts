@@ -4,7 +4,7 @@ import type { ToolContext } from "../tool-context.js";
 import { openCellStore } from "../cell-store.js";
 import { skillStats, sortRows, withCategory } from "../portfolio-reads.js";
 
-// Skills and their categories live in the roles-skills cell; progress_log stays in SQLite.
+// Skills and their categories live in the roles-skills cell; progress log entries (resource progress-log) live there too.
 const rolesSkills = () => openCellStore("roles-skills", "legacy-mcp", { channel: "mcp" });
 
 export function registerSkillsTools({
@@ -63,7 +63,6 @@ export function registerSkillsTools({
             slug: z.string().optional(),
         },
         async (params) => {
-            const db = await getDb();
             const cell = rolesSkills();
             let skill: any;
             if (params.id) {
@@ -77,11 +76,9 @@ export function registerSkillsTools({
             }
             if (!skill)
                 return { content: [{ type: "text", text: "Skill not found" }] };
-            const recentLogs = db
-                .prepare(
-                    "SELECT * FROM progress_log WHERE skill_id = ? ORDER BY logged_at DESC LIMIT 10",
-                )
-                .all((skill as any).id);
+            const recentLogs = (await cell.list("progress-log", { skill_id: (skill as any).id }, "desc"))
+                .sort((a, b) => String(b.logged_at ?? "").localeCompare(String(a.logged_at ?? "")) || b.id - a.id)
+                .slice(0, 10);
             return {
                 content: [
                     {
@@ -150,7 +147,6 @@ export function registerSkillsTools({
             what_learned: z.string().optional(),
         },
         async (params) => {
-            const db = await getDb();
             const {
                 id,
                 log_activity,
@@ -173,18 +169,17 @@ export function registerSkillsTools({
             const skill = Object.keys(fields).length > 0 ? await cell.update("skills", id, fields) : current;
 
             if (log_activity && activity_title) {
-                db.prepare(
-                    "INSERT INTO progress_log (skill_id, activity_type, title, description, hours_spent, progress_before, progress_after, what_learned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ).run(
-                    id,
-                    activity_type || "other",
-                    activity_title,
-                    activity_description || null,
-                    hours_spent || null,
-                    current.progress_percent,
-                    rest.progress_percent ?? current.progress_percent,
-                    what_learned || null,
-                );
+                await cell.create("progress-log", {
+                    skill_id: id,
+                    activity_type: activity_type || "other",
+                    title: activity_title,
+                    description: activity_description ?? null,
+                    hours_spent: hours_spent || null,
+                    progress_before: current.progress_percent,
+                    progress_after: rest.progress_percent ?? current.progress_percent,
+                    what_learned: what_learned ?? null,
+                    logged_at: new Date().toISOString(),
+                });
             }
 
             return {

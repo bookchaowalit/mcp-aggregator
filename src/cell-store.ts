@@ -1,5 +1,5 @@
 /**
- * One client for every cell made with solo-cell-kit (goals, projects, roles-skills, ...), for the
+ * One client for every generic cell API (goals, projects, roles-skills, ...), for the
  * TypeScript runtimes (owner CLI, dashboard, MCP). Mirrors solo-ops infra/scripts/utils/cell_store.py: every
  * resource has list (all pages), get, create, update, delete and stats.
  *

@@ -1,6 +1,6 @@
 /**
  * Habits cell client for the TypeScript runtimes (owner CLI, dashboard). Mirrors the read and
- * log surface of solo-ops infra/scripts/utils/habits_store.py. Habits live in the habits cell (solo-habits);
+ * log surface of ops-toolkit infra/scripts/utils/habits_store.py. Habits live in the habits cell (habits);
  * the service owns current_streak, best_streak and last_completed_at, so callers never compute streaks.
  *
  *   EMPIRE_HABITS_API=https://...   # env, or the owner-only client file (see task-store clientValue)

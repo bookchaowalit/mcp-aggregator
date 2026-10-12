@@ -1,6 +1,6 @@
 /**
  * One client for every generic cell API (goals, projects, roles-skills, ...), for the
- * TypeScript runtimes (owner CLI, dashboard, MCP). Mirrors solo-ops infra/scripts/utils/cell_store.py: every
+ * TypeScript runtimes (owner CLI, dashboard, MCP). Mirrors ops-toolkit infra/scripts/utils/cell_store.py: every
  * resource has list (all pages), get, create, update, delete and stats.
  *
  *   EMPIRE_GOALS_API=https://...   # EMPIRE_<CELL>_API, env or the owner-only client file

@@ -14,11 +14,11 @@ import { MCP_ROOT, opsRoot } from "../src/roots.js";
 import { overrideTaskStoreForTests } from "../src/task-store.js";
 import { SqliteTaskStore, TASKS_DDL, TASK_ROLE_SUGGESTIONS_DDL } from "./support/sqlite-task-store.js";
 
-// The owner CLI (tasks done/update/list...) lives in the solo-ops checkout (SOLO_OPS_ROOT, default ../solo-ops).
+// The owner CLI (tasks done/update/list...) lives in the ops-toolkit checkout (SOLO_OPS_ROOT, default ../ops-toolkit).
 // Tests that drive it skip clearly when that checkout is absent.
 const opsCli = join(opsRoot(), "infra", "cli.ts");
 const hasOps = existsSync(opsCli);
-const skipNoOps = hasOps ? false : `solo-ops owner CLI not found at ${opsCli}; set SOLO_OPS_ROOT to run`;
+const skipNoOps = hasOps ? false : `ops-toolkit owner CLI not found at ${opsCli}; set SOLO_OPS_ROOT to run`;
 const directory = mkdtempSync(join(tmpdir(), "solo-task-lifecycle-"));
 const dbPath = join(directory, "tasks.db");
 const db = new Database(dbPath);

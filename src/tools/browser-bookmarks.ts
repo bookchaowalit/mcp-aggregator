@@ -34,7 +34,7 @@ export function registerBrowserBookmarkTools({
             const script = resolve(lakeRoot, "infra", "scripts", "sync", "brave_bookmark_workflow.py");
             if (!fs.existsSync(script)) {
                 throw new Error(
-                    `brave_bookmark_workflow.py not found at ${script}. It moved to the bookchaowalit/solo-data-lake ` +
+                    `brave_bookmark_workflow.py not found at ${script}. It moved to the bookchaowalit/data-lake ` +
                         "repository; clone it as a sibling checkout or set SOLO_DATA_LAKE_ROOT to its path.",
                 );
             }

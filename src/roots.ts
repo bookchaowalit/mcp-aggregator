@@ -33,3 +33,10 @@ export function dataLakeRoot(env: NodeJS.ProcessEnv = process.env): string {
 export function architectureRoot(env: NodeJS.ProcessEnv = process.env): string {
     return sibling("SOLO_ARCHITECTURE_ROOT", "architecture-docs", env);
 }
+
+/** Policy documents use the architecture checkout's sibling, including custom architecture roots. */
+export function knowledgeRoot(env: NodeJS.ProcessEnv = process.env): string {
+    return env.SOLO_KNOWLEDGE_ROOT !== undefined
+        ? resolve(env.SOLO_KNOWLEDGE_ROOT)
+        : resolve(architectureRoot(env), "..", "knowledge-base");
+}

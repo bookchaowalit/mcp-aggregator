@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { architectureRoot } from "./roots.js";
+import { parseDocument, visit } from "yaml";
+import { architectureRoot, knowledgeRoot } from "./roots.js";
 
 export const DELIVERY_CONTEXT_CONTRACT = "solo-empire.delivery-context.v1";
 export const DELIVERY_CONTEXT_VIEWS = ["overview", "role", "workflow", "documents", "refinement", "artifact"] as const;
@@ -146,6 +147,14 @@ function safePath(path: string, kind: "directory" | "file"): void {
     }
 }
 
+function safeOptionalRoot(path: string): void {
+    try { safePath(path, "directory"); }
+    catch (error) {
+        // A missing optional checkout stays missing; it never selects a fallback root.
+        if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
+    }
+}
+
 function readSafeFile(path: string): Buffer {
     safePath(path, "file");
     const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -187,7 +196,33 @@ function safeArtifactReference(value: Record<string, unknown>, registered: Set<s
     }
 }
 
-function validateData(data: unknown, query: ValidatedQuery, registered: Set<string>, root: string): void {
+type CanonicalStep = { owner_role: string; reviewer_roles: string[] };
+function canonicalSteps(bytes: Buffer): Map<string, CanonicalStep> {
+    try {
+        const document = parseDocument(new TextDecoder("utf-8", { fatal: true }).decode(bytes), {
+            schema: "core", strict: true, uniqueKeys: true, version: "1.2",
+        });
+        if (document.errors.length || document.warnings.length) throw new DeliveryContextError("invalid_provenance");
+        visit(document, { Alias() { throw new DeliveryContextError("invalid_provenance"); } });
+        const workflow: unknown = document.toJS({ maxAliasCount: 0 });
+        if (!record(workflow) || workflow.contract !== "solo-empire.product-delivery-definition.v1" || workflow.version !== 1
+            || workflow.runtime_status !== "not-integrated" || !Array.isArray(workflow.steps) || !workflow.steps.length || workflow.steps.length > 72) {
+            throw new DeliveryContextError("invalid_provenance");
+        }
+        const result = new Map<string, CanonicalStep>();
+        for (const step of workflow.steps) {
+            if (!record(step) || typeof step.id !== "string" || !STEP_ID.test(step.id) || result.has(step.id)
+                || typeof step.owner_role !== "string" || !ROLE_ID.test(step.owner_role) || !Array.isArray(step.reviewer_roles)
+                || step.reviewer_roles.length > 50 || step.reviewer_roles.some((role) => typeof role !== "string" || !ROLE_ID.test(role))) {
+                throw new DeliveryContextError("invalid_provenance");
+            }
+            result.set(step.id, { owner_role: step.owner_role, reviewer_roles: step.reviewer_roles as string[] });
+        }
+        return result;
+    } catch { throw new DeliveryContextError("invalid_provenance"); }
+}
+
+function validateData(data: unknown, query: ValidatedQuery, registered: Set<string>, root: string, policyRoot: string, workflowBytes: Buffer): void {
     const keys = DATA_KEYS[query.view];
     if (!record(data) || Object.keys(data).length !== keys.size || Object.keys(data).some((key) => !keys.has(key))) throw new DeliveryContextError("invalid_data");
     const scan = (value: unknown): void => {
@@ -212,11 +247,15 @@ function validateData(data: unknown, query: ValidatedQuery, registered: Set<stri
             || (query.role ? !record(data.role_context) || data.role_context.id !== query.role : data.role_context !== null)) throw new DeliveryContextError("invalid_data");
         const steps = query.view === "documents" ? data.step_documents : data.steps;
         if (!Array.isArray(steps) || steps.length > 72 || (query.step && steps.length !== 1)) throw new DeliveryContextError("filter_mismatch");
+        const canonical = canonicalSteps(workflowBytes);
+        const permitted = new Set([...canonical].filter(([id, step]) => (!query.step || query.step === id)
+            && (!query.role || query.role === step.owner_role || step.reviewer_roles.includes(query.role))).map(([id]) => id));
+        if ((query.step && !permitted.size) || steps.length !== permitted.size) throw new DeliveryContextError("filter_mismatch");
         const ids = new Set<string>();
         for (const step of steps) {
             if (!record(step)) throw new DeliveryContextError("invalid_data");
             const id = query.view === "workflow" ? step.id : step.step_id;
-            if (typeof id !== "string" || !STEP_ID.test(id) || ids.has(id) || (query.step && id !== query.step)) throw new DeliveryContextError("filter_mismatch");
+            if (typeof id !== "string" || !permitted.has(id) || ids.has(id)) throw new DeliveryContextError("filter_mismatch");
             ids.add(id);
         }
     }
@@ -237,14 +276,11 @@ function validateData(data: unknown, query: ValidatedQuery, registered: Set<stri
         const expectedLength = Math.min(limit, Math.max(0, total - offset));
         const truncated = offset + length < total;
         if (length !== expectedLength || data.truncated !== truncated || data.next_offset !== (truncated ? offset + length : null)) throw new DeliveryContextError("invalid_artifact");
-        if (data.owner_repository === "architecture-docs") {
-            const path = join(root, String(data.path));
-            safePath(path, "file");
-            const bytes = readSafeFile(path);
-            if (bytes.length > MAX_BYTES || createHash("sha256").update(bytes).digest("hex") !== data.sha256) throw new DeliveryContextError("integrity_mismatch");
-            const characters = Array.from(bytes.toString("utf8"));
-            if (characters.length !== total || characters.slice(offset, offset + limit).join("") !== data.body) throw new DeliveryContextError("integrity_mismatch");
-        }
+        const path = join(data.owner_repository === "architecture-docs" ? root : policyRoot, String(data.path));
+        const bytes = readSafeFile(path);
+        if (bytes.length > MAX_BYTES || createHash("sha256").update(bytes).digest("hex") !== data.sha256) throw new DeliveryContextError("integrity_mismatch");
+        const characters = Array.from(bytes.toString("utf8"));
+        if (characters.length !== total || characters.slice(offset, offset + limit).join("") !== data.body) throw new DeliveryContextError("integrity_mismatch");
     }
 }
 
@@ -319,7 +355,7 @@ function record(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validateResult(value: unknown, query: ValidatedQuery, root: string): DeliveryContextResult {
+function validateResult(value: unknown, query: ValidatedQuery, root: string, policyRoot: string): DeliveryContextResult {
     if (record(value) && value.contract === DELIVERY_CONTEXT_CONTRACT && ["invalid", "unavailable"].includes(String(value.status))) {
         if (!Array.isArray(value.errors) || value.errors.length !== 1 || !record(value.errors[0]) || Object.keys(value.errors[0]).length !== 1
             || typeof value.errors[0].code !== "string" || !EXPORTER_CODES.has(value.errors[0].code)) throw new DeliveryContextError("invalid_contract");
@@ -342,6 +378,7 @@ function validateResult(value: unknown, query: ValidatedQuery, root: string): De
         || filters.limit !== (query.view === "artifact" ? query.limit ?? 8000 : null)) throw new DeliveryContextError("filter_mismatch");
     const paths = new Set<string>();
     const registered = new Set(GUIDE_PATHS);
+    let workflowBytes: Buffer | undefined;
     for (const source of value.sources) {
         if (!record(source) || typeof source.path !== "string" || paths.has(source.path)
             || !(source.version === null || ["string", "number"].includes(typeof source.version)) || typeof source.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(source.sha256)
@@ -353,9 +390,11 @@ function validateResult(value: unknown, query: ValidatedQuery, root: string): De
         if (bytes.length > MAX_BYTES || createHash("sha256").update(bytes).digest("hex") !== source.sha256) {
             throw new DeliveryContextError("integrity_mismatch");
         }
+        if (source.path === "systems/architecture/product-delivery-workflow.yaml") workflowBytes = bytes;
         for (const match of bytes.toString("utf8").matchAll(/\btemplates\/[a-zA-Z0-9_./-]+\.md\b/g)) registered.add(match[0]);
     }
-    validateData(value.data, query, registered, root);
+    if (!workflowBytes) throw new DeliveryContextError("invalid_provenance");
+    validateData(value.data, query, registered, root, policyRoot, workflowBytes);
     return value as DeliveryContextResult;
 }
 
@@ -370,6 +409,10 @@ export async function getDeliveryContext(input: DeliveryContextQuery = {}, depen
         if (configuredRoot?.split(/[\\/]/).some((part) => part === ".." || deniedComponent(part))) throw new DeliveryContextError("unsafe_path");
         const root = architectureRoot(env);
         safePath(root, "directory");
+        const configuredKnowledge = env.SOLO_KNOWLEDGE_ROOT;
+        if (configuredKnowledge !== undefined && (!configuredKnowledge || configuredKnowledge.split(/[\\/]/).some((part) => part === ".." || deniedComponent(part)))) throw new DeliveryContextError("unsafe_path");
+        const policyRoot = knowledgeRoot(env);
+        safeOptionalRoot(policyRoot);
         const script = join(root, "scripts", "delivery_context.py");
         safePath(script, "file");
         const args = [script, "--json", "--view", query.view];
@@ -379,10 +422,13 @@ export async function getDeliveryContext(input: DeliveryContextQuery = {}, depen
         if (query.view === "artifact") args.push("--offset", String(query.offset ?? 0), "--limit", String(query.limit ?? 8000));
         const result = await (dependencies.execute ?? execute)(env.PYTHON || "python3", args, {
             cwd: root, timeout: 30000, maxBuffer: MAX_BYTES,
-            env: { PATH: env.PATH, LANG: "C.UTF-8", PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", EMPIRE_CLIENT_CONFIG: "/nonexistent" },
+            env: {
+                PATH: env.PATH, LANG: "C.UTF-8", PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", EMPIRE_CLIENT_CONFIG: "/nonexistent",
+                ...(configuredKnowledge !== undefined ? { SOLO_KNOWLEDGE_ROOT: policyRoot } : {}),
+            },
         });
         if (typeof result.stdout !== "string" || Buffer.byteLength(result.stdout, "utf8") > MAX_BYTES) throw new DeliveryContextError("output_limit");
-        return validateResult(strictJson(result.stdout), query, root);
+        return validateResult(strictJson(result.stdout), query, root, policyRoot);
     } catch (error) {
         return failure(error instanceof DeliveryContextError && ["invalid_json", "invalid_contract", "invalid_data", "invalid_artifact", "filter_mismatch", "invalid_provenance", "integrity_mismatch", "output_limit"].includes(error.code) ? "invalid" : "unavailable",
             error instanceof DeliveryContextError && (ADAPTER_CODES.has(error.code) || EXPORTER_CODES.has(error.code)) ? error.code : "exporter_unavailable");

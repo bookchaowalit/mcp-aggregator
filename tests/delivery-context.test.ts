@@ -37,6 +37,34 @@ function selectedFixtureSteps(query: DeliveryContextQuery) {
         && (!query.role || step.owner_role === query.role || step.reviewer_roles.includes(query.role)));
 }
 
+test("short reads retain a fixed allocation budget across verified sources and policy", async () => {
+    const f = knowledgeFixture();
+    const cap = 2097152;
+    const bytes = Buffer.alloc(cap, "x");
+    writeFileSync(join(f.knowledge, f.path), bytes);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    Object.assign(f.result.data, { body: "xx", total: cap, sha256: hash, version: `sha256:${hash}` });
+    const originalAllocate = Buffer.allocUnsafe;
+    const originalRead = fs.readSync;
+    let allocated = 0;
+    const allocation = mock.method(Buffer, "allocUnsafe", (size: number) => {
+        allocated += size;
+        return originalAllocate(size);
+    });
+    const partial = mock.method(fs, "readSync", (...args: any[]) =>
+        (originalRead as any)(args[0], args[1], args[2], Math.min(args[3], 777), args[4]));
+    syncBuiltinESMExports();
+    try {
+        assert.equal((await getDeliveryContext(f.query, f.dependencies)).status, "ready");
+        assert.ok(allocated > 0);
+        assert.ok(allocated <= (sourcePaths.length + 1) * (cap + 1), `allocated ${allocated} bytes for bounded reads`);
+    } finally {
+        allocation.mock.restore();
+        partial.mock.restore();
+        syncBuiltinESMExports();
+    }
+});
+
 test("policy growth after metadata checks cannot consume beyond the byte ceiling", async () => {
     const f = knowledgeFixture();
     const policy = join(f.knowledge, f.path);

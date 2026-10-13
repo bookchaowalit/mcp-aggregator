@@ -162,15 +162,13 @@ function readSafeFile(path: string): Buffer {
         const stat = fstatSync(descriptor);
         if (!stat.isFile() || stat.size > MAX_BYTES) throw new DeliveryContextError("unsafe_path");
         safePath(path, "file");
-        const chunks: Buffer[] = [];
+        const bytes = Buffer.allocUnsafe(MAX_BYTES + 1);
         let total = 0;
         while (total <= MAX_BYTES) {
-            const chunk = Buffer.allocUnsafe(Math.min(65536, MAX_BYTES + 1 - total));
-            const count = readSync(descriptor, chunk, 0, chunk.length, null);
-            if (!count) return Buffer.concat(chunks, total);
+            const count = readSync(descriptor, bytes, total, Math.min(65536, bytes.length - total), null);
+            if (!count) return bytes.subarray(0, total);
             total += count;
             if (total > MAX_BYTES) throw new DeliveryContextError("output_limit");
-            chunks.push(chunk.subarray(0, count));
         }
         throw new DeliveryContextError("output_limit");
     } finally { closeSync(descriptor); }

@@ -8,7 +8,7 @@ import { opsRoot, opsScriptsDir } from "./roots.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-// The Python scripts the tools shell out to live in the ops-toolkit checkout (SOLO_OPS_ROOT, default ../ops-toolkit).
+// The Python scripts the tools shell out to live in the ops-toolkit checkout (SOLO_OPS_ROOT, default ../platform-ops-cli).
 const REPO_ROOT = opsRoot();
 const SCRIPTS_DIR = opsScriptsDir();
 const PYTHON = process.env.PYTHON || "python3";

@@ -16,7 +16,7 @@ function sibling(envName: string, repo: string, env: NodeJS.ProcessEnv = process
 
 /** ops-toolkit checkout (Python scripts the tools shell out to, owner CLI, .runtime tokens). Override: SOLO_OPS_ROOT. */
 export function opsRoot(env: NodeJS.ProcessEnv = process.env): string {
-    return sibling("SOLO_OPS_ROOT", "ops-toolkit", env);
+    return sibling("SOLO_OPS_ROOT", "platform-ops-cli", env);
 }
 
 /** Directory holding the ops-toolkit Python scripts. Override: SOLO_OPS_SCRIPTS_DIR. */
@@ -26,5 +26,5 @@ export function opsScriptsDir(env: NodeJS.ProcessEnv = process.env): string {
 
 /** data-lake checkout. Override: SOLO_DATA_LAKE_ROOT. */
 export function dataLakeRoot(env: NodeJS.ProcessEnv = process.env): string {
-    return sibling("SOLO_DATA_LAKE_ROOT", "data-lake", env);
+    return sibling("SOLO_DATA_LAKE_ROOT", "data-lake-pipelines", env);
 }

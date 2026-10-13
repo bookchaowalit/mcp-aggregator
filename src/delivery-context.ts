@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { parseDocument, visit } from "yaml";
@@ -162,9 +162,17 @@ function readSafeFile(path: string): Buffer {
         const stat = fstatSync(descriptor);
         if (!stat.isFile() || stat.size > MAX_BYTES) throw new DeliveryContextError("unsafe_path");
         safePath(path, "file");
-        const bytes = readFileSync(descriptor);
-        if (bytes.length > MAX_BYTES) throw new DeliveryContextError("output_limit");
-        return bytes;
+        const chunks: Buffer[] = [];
+        let total = 0;
+        while (total <= MAX_BYTES) {
+            const chunk = Buffer.allocUnsafe(Math.min(65536, MAX_BYTES + 1 - total));
+            const count = readSync(descriptor, chunk, 0, chunk.length, null);
+            if (!count) return Buffer.concat(chunks, total);
+            total += count;
+            if (total > MAX_BYTES) throw new DeliveryContextError("output_limit");
+            chunks.push(chunk.subarray(0, count));
+        }
+        throw new DeliveryContextError("output_limit");
     } finally { closeSync(descriptor); }
 }
 
@@ -197,14 +205,36 @@ function safeArtifactReference(value: Record<string, unknown>, registered: Set<s
 }
 
 type CanonicalStep = { owner_role: string; reviewer_roles: string[] };
-function canonicalSteps(bytes: Buffer): Map<string, CanonicalStep> {
+function canonicalYaml(bytes: Buffer): unknown {
     try {
         const document = parseDocument(new TextDecoder("utf-8", { fatal: true }).decode(bytes), {
             schema: "core", strict: true, uniqueKeys: true, version: "1.2",
         });
         if (document.errors.length || document.warnings.length) throw new DeliveryContextError("invalid_provenance");
         visit(document, { Alias() { throw new DeliveryContextError("invalid_provenance"); } });
-        const workflow: unknown = document.toJS({ maxAliasCount: 0 });
+        return document.toJS({ maxAliasCount: 0 });
+    } catch { throw new DeliveryContextError("invalid_provenance"); }
+}
+
+function canonicalRoles(bytes: Buffer): Set<string> {
+    const catalog = canonicalYaml(bytes);
+    if (!record(catalog) || catalog.version !== 1 || catalog.kind !== "atomic-role-catalog" || catalog.status !== "current"
+        || !Array.isArray(catalog.roles) || !catalog.roles.length || catalog.roles.length > 50) {
+        throw new DeliveryContextError("invalid_provenance");
+    }
+    const roles = new Set<string>();
+    for (const role of catalog.roles) {
+        if (!record(role) || typeof role.id !== "string" || !ROLE_ID.test(role.id) || roles.has(role.id)) {
+            throw new DeliveryContextError("invalid_provenance");
+        }
+        roles.add(role.id);
+    }
+    return roles;
+}
+
+function canonicalSteps(bytes: Buffer, roles: Set<string>): Map<string, CanonicalStep> {
+    try {
+        const workflow = canonicalYaml(bytes);
         if (!record(workflow) || workflow.contract !== "solo-empire.product-delivery-definition.v1" || workflow.version !== 1
             || workflow.runtime_status !== "not-integrated" || !Array.isArray(workflow.steps) || !workflow.steps.length || workflow.steps.length > 72) {
             throw new DeliveryContextError("invalid_provenance");
@@ -212,8 +242,10 @@ function canonicalSteps(bytes: Buffer): Map<string, CanonicalStep> {
         const result = new Map<string, CanonicalStep>();
         for (const step of workflow.steps) {
             if (!record(step) || typeof step.id !== "string" || !STEP_ID.test(step.id) || result.has(step.id)
-                || typeof step.owner_role !== "string" || !ROLE_ID.test(step.owner_role) || !Array.isArray(step.reviewer_roles)
-                || step.reviewer_roles.length > 50 || step.reviewer_roles.some((role) => typeof role !== "string" || !ROLE_ID.test(role))) {
+                || typeof step.owner_role !== "string" || !roles.has(step.owner_role) || !Array.isArray(step.reviewer_roles)
+                || !step.reviewer_roles.length || step.reviewer_roles.length > roles.size
+                || new Set(step.reviewer_roles).size !== step.reviewer_roles.length
+                || step.reviewer_roles.some((role) => typeof role !== "string" || !roles.has(role))) {
                 throw new DeliveryContextError("invalid_provenance");
             }
             result.set(step.id, { owner_role: step.owner_role, reviewer_roles: step.reviewer_roles as string[] });
@@ -222,7 +254,7 @@ function canonicalSteps(bytes: Buffer): Map<string, CanonicalStep> {
     } catch { throw new DeliveryContextError("invalid_provenance"); }
 }
 
-function validateData(data: unknown, query: ValidatedQuery, registered: Set<string>, root: string, policyRoot: string, workflowBytes: Buffer): void {
+function validateData(data: unknown, query: ValidatedQuery, registered: Set<string>, root: string, policyRoot: string, workflowBytes: Buffer, roles: Set<string>): void {
     const keys = DATA_KEYS[query.view];
     if (!record(data) || Object.keys(data).length !== keys.size || Object.keys(data).some((key) => !keys.has(key))) throw new DeliveryContextError("invalid_data");
     const scan = (value: unknown): void => {
@@ -247,7 +279,7 @@ function validateData(data: unknown, query: ValidatedQuery, registered: Set<stri
             || (query.role ? !record(data.role_context) || data.role_context.id !== query.role : data.role_context !== null)) throw new DeliveryContextError("invalid_data");
         const steps = query.view === "documents" ? data.step_documents : data.steps;
         if (!Array.isArray(steps) || steps.length > 72 || (query.step && steps.length !== 1)) throw new DeliveryContextError("filter_mismatch");
-        const canonical = canonicalSteps(workflowBytes);
+        const canonical = canonicalSteps(workflowBytes, roles);
         const permitted = new Set([...canonical].filter(([id, step]) => (!query.step || query.step === id)
             && (!query.role || query.role === step.owner_role || step.reviewer_roles.includes(query.role))).map(([id]) => id));
         if ((query.step && !permitted.size) || steps.length !== permitted.size) throw new DeliveryContextError("filter_mismatch");
@@ -379,6 +411,7 @@ function validateResult(value: unknown, query: ValidatedQuery, root: string, pol
     const paths = new Set<string>();
     const registered = new Set(GUIDE_PATHS);
     let workflowBytes: Buffer | undefined;
+    let roleBytes: Buffer | undefined;
     for (const source of value.sources) {
         if (!record(source) || typeof source.path !== "string" || paths.has(source.path)
             || !(source.version === null || ["string", "number"].includes(typeof source.version)) || typeof source.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(source.sha256)
@@ -391,10 +424,13 @@ function validateResult(value: unknown, query: ValidatedQuery, root: string, pol
             throw new DeliveryContextError("integrity_mismatch");
         }
         if (source.path === "systems/architecture/product-delivery-workflow.yaml") workflowBytes = bytes;
+        if (source.path === "docs/registries/ROLE-CATALOG.yaml") roleBytes = bytes;
         for (const match of bytes.toString("utf8").matchAll(/\btemplates\/[a-zA-Z0-9_./-]+\.md\b/g)) registered.add(match[0]);
     }
-    if (!workflowBytes) throw new DeliveryContextError("invalid_provenance");
-    validateData(value.data, query, registered, root, policyRoot, workflowBytes);
+    if (!workflowBytes || !roleBytes) throw new DeliveryContextError("invalid_provenance");
+    const roles = canonicalRoles(roleBytes);
+    if (query.role && !roles.has(query.role)) throw new DeliveryContextError("role_unknown");
+    validateData(value.data, query, registered, root, policyRoot, workflowBytes, roles);
     return value as DeliveryContextResult;
 }
 
@@ -430,7 +466,7 @@ export async function getDeliveryContext(input: DeliveryContextQuery = {}, depen
         if (typeof result.stdout !== "string" || Buffer.byteLength(result.stdout, "utf8") > MAX_BYTES) throw new DeliveryContextError("output_limit");
         return validateResult(strictJson(result.stdout), query, root, policyRoot);
     } catch (error) {
-        return failure(error instanceof DeliveryContextError && ["invalid_json", "invalid_contract", "invalid_data", "invalid_artifact", "filter_mismatch", "invalid_provenance", "integrity_mismatch", "output_limit"].includes(error.code) ? "invalid" : "unavailable",
+        return failure(error instanceof DeliveryContextError && ["invalid_json", "invalid_contract", "invalid_data", "invalid_artifact", "filter_mismatch", "invalid_provenance", "integrity_mismatch", "output_limit", "role_unknown"].includes(error.code) ? "invalid" : "unavailable",
             error instanceof DeliveryContextError && (ADAPTER_CODES.has(error.code) || EXPORTER_CODES.has(error.code)) ? error.code : "exporter_unavailable");
     }
 }

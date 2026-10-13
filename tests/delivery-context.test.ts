@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
+import { after, test, mock } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,6 +36,92 @@ function selectedFixtureSteps(query: DeliveryContextQuery) {
     return fixtureSteps.filter((step) => (!query.step || step.id === query.step)
         && (!query.role || step.owner_role === query.role || step.reviewer_roles.includes(query.role)));
 }
+
+test("policy growth after metadata checks cannot consume beyond the byte ceiling", async () => {
+    const f = knowledgeFixture();
+    const policy = join(f.knowledge, f.path);
+    const inode = fs.statSync(policy).ino;
+    const cap = 2097152;
+    const originalStat = fs.fstatSync;
+    const originalReadFile = fs.readFileSync;
+    const originalRead = fs.readSync;
+    let consumed = 0;
+    let grown = false;
+    const grow = (fd: number) => {
+        if (originalStat(fd).ino !== inode) return false;
+        if (!grown) {
+            grown = true;
+            writeFileSync(policy, Buffer.alloc(cap + 4096, "x"));
+        }
+        return true;
+    };
+    const whole = mock.method(fs, "readFileSync", (...args: any[]) => {
+        const target = typeof args[0] === "number" && grow(args[0]);
+        const before = consumed;
+        const bytes = (originalReadFile as any)(...args);
+        if (target && consumed === before) consumed += bytes.length;
+        return bytes;
+    });
+    const bounded = mock.method(fs, "readSync", (...args: any[]) => {
+        const target = grow(args[0]);
+        const count = (originalRead as any)(...args);
+        if (target) consumed += count;
+        return count;
+    });
+    syncBuiltinESMExports();
+    try {
+        safeFailure(await getDeliveryContext(f.query, f.dependencies), "invalid", "output_limit");
+        assert.equal(grown, true);
+        assert.ok(consumed <= cap + 1, `read ${consumed} bytes past the ceiling`);
+    } finally {
+        whole.mock.restore();
+        bounded.mock.restore();
+        syncBuiltinESMExports();
+    }
+});
+
+test("unregistered requested roles cannot masquerade as empty family results", async () => {
+    for (const view of ["workflow", "documents", "refinement"] as const) {
+        const query = { view, role: "unregistered-capability" };
+        const f = fixture(query);
+        safeFailure(await getDeliveryContext(query, f.dependencies), "invalid", "role_unknown");
+    }
+});
+
+test("canonical owner and reviewer membership and uniqueness are required", async () => {
+    for (const view of ["workflow", "documents", "refinement"] as const) {
+        const query = { view };
+        const f = fixture(query);
+        const valid = readFileSync(join(f.root, sourcePaths[0]), "utf8");
+        for (const source of [
+            valid.replace("owner_role: product-manager", "owner_role: unregistered-capability"),
+            valid.replace("reviewer_roles: [business-analyst]", "reviewer_roles: [unregistered-capability]"),
+            valid.replace("reviewer_roles: [business-analyst]", "reviewer_roles: [business-analyst, business-analyst]"),
+            valid.replace("reviewer_roles: [business-analyst]", "reviewer_roles: []"),
+        ]) {
+            writeFileSync(join(f.root, sourcePaths[0]), source);
+            f.result.sources[0].sha256 = createHash("sha256").update(source).digest("hex");
+            safeFailure(await getDeliveryContext(query, f.dependencies), "invalid", "invalid_provenance");
+        }
+    }
+});
+
+test("verified role catalog rejects duplicate IDs keys aliases and malformed identities", async () => {
+    const f = fixture({ view: "workflow" });
+    const valid = readFileSync(join(f.root, sourceRelative), "utf8");
+    for (const source of [
+        valid + "- id: product-manager\n",
+        valid + "\nroles: []\n",
+        valid + "\nextra: &alias []\ncopy: *alias\n",
+        valid.replace("- id: product-manager", "- id: [product-manager]"),
+        valid.replace("atomic-role-catalog", "unknown-catalog"),
+        valid.replace("version: 1", "version: 2"),
+    ]) {
+        writeFileSync(join(f.root, sourceRelative), source);
+        f.result.sources.find((item) => item.path === sourceRelative)!.sha256 = createHash("sha256").update(source).digest("hex");
+        safeFailure(await getDeliveryContext({ view: "workflow" }, f.dependencies), "invalid", "invalid_provenance");
+    }
+});
 function fixtureData(query: DeliveryContextQuery): Record<string, unknown> {
     if (query.view === "workflow") return {
         contract: "solo-empire.product-delivery-definition.v1", version: 1, status: "design-ready", runtime_status: "not-integrated",
@@ -63,13 +151,15 @@ function fixture(query: DeliveryContextQuery = {}) {
     mkdirSync(join(root, "scripts"), { recursive: true });
     writeFileSync(join(root, "scripts/delivery_context.py"), "# Offline fixture\n");
     const source = "version: 1\nroles: []\n";
+    const roleCatalog = "version: 1\nkind: atomic-role-catalog\nstatus: current\nroles:\n"
+        + ["product-manager", "business-analyst", "finance-accounting"].map((id) => `- id: ${id}\n`).join("");
     const workflow = [
         "contract: solo-empire.product-delivery-definition.v1", "version: 1", "runtime_status: not-integrated", "steps:",
         ...fixtureSteps.flatMap((step) => [`- id: ${step.id}`, `  owner_role: ${step.owner_role}`, `  reviewer_roles: [${step.reviewer_roles.join(", ")}]`]), "",
     ].join("\n");
     for (const path of sourcePaths) {
         mkdirSync(dirname(join(root, path)), { recursive: true });
-        writeFileSync(join(root, path), path === sourcePaths[0] ? workflow : source);
+        writeFileSync(join(root, path), path === sourcePaths[0] ? workflow : path === sourceRelative ? roleCatalog : source);
     }
     const result = {
         contract: DELIVERY_CONTEXT_CONTRACT, status: "ready",
@@ -78,7 +168,7 @@ function fixture(query: DeliveryContextQuery = {}) {
             content_truth: "not_verified", live_readiness: "not_verified",
             business_acceptance: "not_verified", release_authorization: "not_verified",
         },
-        sources: sourcePaths.map((path) => ({ path, version: 1, sha256: createHash("sha256").update(path === sourcePaths[0] ? workflow : source).digest("hex") })),
+        sources: sourcePaths.map((path) => ({ path, version: 1, sha256: createHash("sha256").update(path === sourcePaths[0] ? workflow : path === sourceRelative ? roleCatalog : source).digest("hex") })),
         view: query.view ?? "overview",
         filters: {
             role: query.role ?? null, step: query.step ?? null, artifact_id: query.artifact_id ?? null,
@@ -504,6 +594,9 @@ test("source-defined family roles legitimately have empty results in all three d
         for (const view of ["workflow", "documents", "refinement"] as const) {
             const query = { view, role };
             const f = fixture(query);
+            const roleBytes = readFileSync(join(root, sourceRelative));
+            writeFileSync(join(f.root, sourceRelative), roleBytes);
+            f.result.sources.find((source) => source.path === sourceRelative)!.sha256 = createHash("sha256").update(roleBytes).digest("hex");
             assert.equal((await getDeliveryContext(query, f.dependencies)).status, "ready", `${view}:${role}`);
         }
     }

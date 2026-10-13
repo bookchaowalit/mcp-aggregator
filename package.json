@@ -13,7 +13,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "https://github.com/bookchaowalit/mcp-aggregator.git"
+        "url": "https://github.com/bookchaowalit/platform-mcp-aggregator.git"
     },
     "scripts": {
         "build": "tsc",

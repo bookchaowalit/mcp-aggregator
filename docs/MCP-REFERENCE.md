@@ -2,12 +2,37 @@
 title: MCP Quick Reference Card
 status: current
 tags: [current, mcp]
-updated: 2026-08-04
+updated: 2026-10-13
 ---
 
 > **Canonical live MCP/credential status.** Prefer this file over historical MCP snapshots.
 
 # MCP Quick Reference Card
+
+## Delivery context (local stdio)
+
+`get_delivery_context` อ่านมาตรฐานจาก `architecture-docs` ด้วย contract
+`solo-empire.delivery-context.v1`. ใช้ `SOLO_ARCHITECTURE_ROOT` หรือ sibling
+`../architecture-docs`; ไม่มี dependency ต่อ hub และผู้เรียกส่ง paths/commands ไม่ได้.
+
+| View | Arguments |
+|---|---|
+| `overview` | ไม่มี filter |
+| `role` | `role` ที่อยู่ใน catalog |
+| `workflow`, `documents`, `refinement` | `role` และ/หรือ `step` ที่สัมพันธ์กัน (optional) |
+| `artifact` | `artifact_id` ที่ exporter คืนให้; `offset` 0..2097152, `limit` 1..16000 (default 0/8000) |
+
+ตัวอย่าง: `{"view":"refinement","role":"business-analyst","step":"BA03"}`.
+ผลมี SHA256 และเวอร์ชันแหล่งข้อมูลที่ตรวจแล้ว พร้อม capability
+`definition_available=true`, `runtime_integrated=false`. ข้อมูลนี้ยังไม่ยืนยันความจริง
+ทางธุรกิจ สถานะสด การตรวจรับ หรือสิทธิ์ release; ทั้งสี่ authority เป็น `not_verified`.
+ไม่มีการอ่าน client work records หรือส่งเอกสารให้ลูกค้า.
+
+เมื่ออัปเดต server ให้เริ่ม local stdio process ใหม่และ reconnect client แล้วตรวจ
+`tools/list`. การเชื่อม MCP ของ session เดิมและ hosted MCP ไม่ได้อัปเดตโดยอัตโนมัติ;
+repository นี้ยังไม่มี hosted deployment target ที่กำหนดไว้.
+
+ตรวจแบบ offline: `EMPIRE_CLIENT_CONFIG=/nonexistent task check`.
 
 **Last updated:** 2026-06-29  
 **Status:** ✅ 10 Working | ⏳ 5 Pending Credentials | ⏸ 2 Paused | 🔧 8 Utility

@@ -28,3 +28,8 @@ export function opsScriptsDir(env: NodeJS.ProcessEnv = process.env): string {
 export function dataLakeRoot(env: NodeJS.ProcessEnv = process.env): string {
     return sibling("SOLO_DATA_LAKE_ROOT", "data-lake-pipelines", env);
 }
+
+/** Architecture definitions and central templates. Override: SOLO_ARCHITECTURE_ROOT. */
+export function architectureRoot(env: NodeJS.ProcessEnv = process.env): string {
+    return sibling("SOLO_ARCHITECTURE_ROOT", "architecture-docs", env);
+}

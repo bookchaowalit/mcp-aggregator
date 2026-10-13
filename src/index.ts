@@ -58,6 +58,7 @@ import { registerCronTools } from "./tools/cron.js";
 import { registerBrowserBookmarkTools } from "./tools/browser-bookmarks.js";
 import { registerFreeImageTools } from "./tools/free-images.js";
 import { registerSeoReportTools } from "./tools/seo-report.js";
+import { registerDeliveryContextTools } from "./tools/delivery-context.js";
 
 const toolContext: ToolContext = {
     server,
@@ -82,6 +83,7 @@ registerCronTools(toolContext);
 registerBrowserBookmarkTools(toolContext);
 registerFreeImageTools(toolContext);
 registerSeoReportTools(toolContext);
+registerDeliveryContextTools({ server });
 
 // =====================================================
 // START SERVER

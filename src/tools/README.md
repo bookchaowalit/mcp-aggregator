@@ -14,3 +14,10 @@ never sends the client report, and never invents GA4 numbers.
 Each module exports one `register*Tools(context)` function. The public tool name,
 description, schema, and response contract must remain backward compatible unless
 the MCP version is intentionally changed.
+
+`delivery-context.ts` ลงทะเบียน `get_delivery_context` สำหรับอ่านนิยาม role/workflow,
+ชุดเอกสาร, refinement และแม่แบบจาก exporter กลางของ `architecture-docs`.
+ใช้ `src/delivery-context.ts` ร่วมกับ owner CLI เพื่อให้ validation และผล JSON ตรงกัน.
+tool มี `readOnlyHint=true`, `destructiveHint=false`, `idempotentHint=true`,
+`openWorldHint=false`; ผล text และ `structuredContent` ใช้ข้อมูลเดียวกัน.
+ไม่มี caller-controlled filesystem/subprocess options และไม่มี raw-output fallback.

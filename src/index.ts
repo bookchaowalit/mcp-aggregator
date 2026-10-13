@@ -17,7 +17,7 @@ const PYTHON = process.env.PYTHON || "python3";
 function runPyScript(scriptPath: string, args: string[] = []): Promise<any> {
     return new Promise((resolve, reject) => {
         if (!fs.existsSync(scriptPath)) {
-            reject(new Error(`script not found: ${scriptPath}; clone bookchaowalit/ops-toolkit as a sibling or set SOLO_OPS_ROOT / SOLO_OPS_SCRIPTS_DIR`));
+            reject(new Error(`script not found: ${scriptPath}; clone bookchaowalit/platform-ops-cli as a sibling or set SOLO_OPS_ROOT / SOLO_OPS_SCRIPTS_DIR`));
             return;
         }
         const fullArgs = [scriptPath, ...args, "--json"];

@@ -1,6 +1,6 @@
 # mcp-aggregator
 
-Local MCP server for Solo Empire (`bookchaowalit/mcp-aggregator`), split from the
+Local MCP server for Solo Empire (`bookchaowalit/platform-mcp-aggregator`), split from the
 `solo-empire` hub (`infra/mcp-server/`, history kept via `git subtree split`)
 together with the MCP docs (`docs/`, from the hub's `mcp/`).
 

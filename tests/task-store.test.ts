@@ -190,13 +190,20 @@ test("api backend stats, assignments and task types use the contract endpoints",
 test("api backend maps errors and refuses to guess a missing token", async () => {
     const failing: FetchLike = async () => ({ ok: false, status: 403, json: async () => ({ detail: { reason: "forbidden" } }) });
     await assert.rejects(new ApiTaskStore("http://x", "t", { fetch: failing }).list(), /403: forbidden/);
+    const { env } = clientFile(null);
     assert.throws(
-        () => openTaskStore("no-such-automation", { env: { SOLO_EMPIRE_TASKS_BACKEND: "api" } }),
+        () => openTaskStore("no-such-automation", { env: { ...env, SOLO_EMPIRE_TASKS_BACKEND: "api" } }),
+        /sets no EMPIRE_TASKS_API/,
+    );
+    assert.throws(
+        () => openTaskStore("no-such-automation", {
+            env: { ...env, SOLO_EMPIRE_TASKS_BACKEND: "api", EMPIRE_TASKS_API: "https://tasks.example.com" },
+        }),
         /no token for automation/,
     );
-    assert.throws(() => openTaskStore("x", { env: { SOLO_EMPIRE_TASKS_BACKEND: "nope" } }), /unknown SOLO_EMPIRE_TASKS_BACKEND/);
-    assert.throws(() => openTaskStore("x", { env: { SOLO_EMPIRE_TASKS_BACKEND: "sqlite" } }), /retired on 2026-10-09/);
-    assert.throws(() => openTaskStore("x", { env: { EMPIRE_CLIENT_CONFIG: "/nonexistent/client.env" } }), /no task backend configured/);
+    assert.throws(() => openTaskStore("x", { env: { ...env, SOLO_EMPIRE_TASKS_BACKEND: "nope" } }), /unknown SOLO_EMPIRE_TASKS_BACKEND/);
+    assert.throws(() => openTaskStore("x", { env: { ...env, SOLO_EMPIRE_TASKS_BACKEND: "sqlite" } }), /retired on 2026-10-09/);
+    assert.throws(() => openTaskStore("x", { env }), /no task backend configured/);
 });
 
 async function mcp(db: Database.Database) {
